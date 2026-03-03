@@ -1142,12 +1142,43 @@ async function startCamera() {
 React.useEffect(() => {
   if (!open) return;
 
+  let active = true;
+
+  async function initCamera() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
+      });
+
+      if (!active) return;
+
+      const video = videoRef.current;
+      if (!video) return;
+
+      streamRef.current = stream;
+      video.srcObject = stream;
+
+      await video.play();
+
+      setReady(true);
+
+    } catch (err) {
+      console.error("Camera error:", err);
+    }
+  }
+
   setReady(false);
   setCaptured(null);
 
-  startCamera();
+  // small delay ensures video is mounted
+  setTimeout(initCamera, 50);
 
   return () => {
+    active = false;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
@@ -1349,19 +1380,12 @@ onChange={handleFileUpload}
 </div>
 <div style={{display:"flex",gap:10}}>
 <button
-style={M.secondaryBtn}
-onClick={() => {
-  setCaptured(null);
-  setCropRect(null);
-  setReady(false);
-
-  if (streamRef.current) {
-    streamRef.current.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-  }
-
-  startCamera();
-}}>
+  style={M.secondaryBtn}
+  onClick={() => {
+    setCaptured(null);
+    setCropRect(null);
+  }}
+>
 RETAKE
 </button>
 <button
