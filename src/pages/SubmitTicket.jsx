@@ -1112,15 +1112,7 @@ const [cropRect, setCropRect] = React.useState(null);
 const dragRef = React.useRef(null);
 const [ready,setReady] = React.useState(false);
 
-React.useEffect(() => {
-  if (!open) return;
-
-  let cancelled = false;
-
-  setReady(false);
-  setCaptured(null);
-
-  async function startCamera() {
+async function startCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: {
@@ -1147,12 +1139,18 @@ React.useEffect(() => {
   }
 }
 
-  requestAnimationFrame(startCamera);
+React.useEffect(() => {
+  if (!open) return;
+
+  setReady(false);
+  setCaptured(null);
+
+  startCamera();
 
   return () => {
-    cancelled = true;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
     }
     setReady(false);
   };
@@ -1357,13 +1355,12 @@ onClick={() => {
   setCropRect(null);
   setReady(false);
 
-  const video = videoRef.current;
-  if (video && streamRef.current) {
-    video.srcObject = streamRef.current;
-    video.play().then(() => {
-      setReady(true);
-    }).catch(() => {});
+  if (streamRef.current) {
+    streamRef.current.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
   }
+
+  startCamera();
 }}>
 RETAKE
 </button>
