@@ -1277,135 +1277,94 @@ if(!open) return null;
 return(
 <div style={M.overlay}>
 <div style={M.modal}>
-{!captured ? (
-<>
 <div style={{ position: "relative" }}>
+
+  {/* VIDEO (always mounted) */}
   <video
-  ref={videoRef}
-  style={M.video}
-  playsInline
-  autoPlay
-/>
-
-  {/* Guide Box */}
-  <div
+    ref={videoRef}
     style={{
-      position: "absolute",
-      top: "15%",
-      left: "10%",
-      width: "80%",
-      height: "70%",
-      border: "3px solid #D4AF37",
-      boxSizing: "border-box",
-      pointerEvents: "none"
+      ...M.video,
+      display: captured ? "none" : "block"
     }}
-  />
-</div>
-
-<div style={{display:"flex",gap:10,marginBottom:10}}>
-<button style={M.primaryBtn} onClick={capture} disabled={!ready}>
-CAPTURE
-</button>
-
-<button
-style={M.secondaryBtn}
-onClick={()=>fileInputRef.current.click()}
->
-UPLOAD
-</button>
-</div>
-
-<input
-type="file"
-accept="image/*"
-ref={fileInputRef}
-style={{display:"none"}}
-onChange={handleFileUpload}
-/>
-</>
-):(
-<>
-<div style={{ position: "relative" }}>
-  <img
-    src={captured}
-    style={{ width: "100%", borderRadius: 8 }}
-    alt=""
+    playsInline
+    autoPlay
   />
 
-  {cropRect && (
+  {/* IMAGE (only shown when captured) */}
+  {captured && (
+    <img
+      src={captured}
+      style={{ width: "100%", borderRadius: 8 }}
+      alt=""
+    />
+  )}
+
+  {/* Guide Box only when live */}
+  {!captured && (
     <div
-      onMouseDown={(e)=>dragRef.current={type:"move",startX:e.clientX,startY:e.clientY}}
-      onTouchStart={(e)=>{
-        const t=e.touches[0];
-        dragRef.current={type:"move",startX:t.clientX,startY:t.clientY};
-      }}
       style={{
-        position:"absolute",
-        left:`${(cropRect.x / canvasRef.current.width) * 100}%`,
-        top:`${(cropRect.y / canvasRef.current.height) * 100}%`,
-        width:`${(cropRect.w / canvasRef.current.width) * 100}%`,
-        height:`${(cropRect.h / canvasRef.current.height) * 100}%`,
-        border:"2px solid #D4AF37",
-        boxSizing:"border-box",
-        cursor:"move"
+        position: "absolute",
+        top: "15%",
+        left: "10%",
+        width: "80%",
+        height: "70%",
+        border: "3px solid #D4AF37",
+        boxSizing: "border-box",
+        pointerEvents: "none"
       }}
     />
   )}
 </div>
-<div style={{display:"flex",gap:10}}>
-<button
-  style={M.secondaryBtn}
-  onClick={() => {
-    setCaptured(null);
-    setCropRect(null);
 
-    const video = videoRef.current;
-    if (video && streamRef.current) {
-      video.srcObject = streamRef.current;
-      video.play().catch(() => {});
-    }
-  }}
->
-RETAKE
-</button>
-<button
-style={M.primaryBtn}
-onClick={()=>{
-  if(!cropRect){
-    onUse(captured);
-    return;
-  }
+<div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
 
-  const canvas = document.createElement("canvas");
-  canvas.width = cropRect.w;
-  canvas.height = cropRect.h;
+  {!captured ? (
+    <>
+      <button
+        style={M.primaryBtn}
+        onClick={capture}
+        disabled={!ready}
+      >
+        CAPTURE
+      </button>
 
-  const ctx = canvas.getContext("2d");
+      <button
+        style={M.secondaryBtn}
+        onClick={() => fileInputRef.current.click()}
+      >
+        UPLOAD
+      </button>
+    </>
+  ) : (
+    <>
+      <button
+        style={M.secondaryBtn}
+        onClick={() => {
+          setCaptured(null);
+          setCropRect(null);
+        }}
+      >
+        RETAKE
+      </button>
 
-  const img = new Image();
-  img.onload = ()=>{
-    ctx.drawImage(
-      img,
-      cropRect.x,
-      cropRect.y,
-      cropRect.w,
-      cropRect.h,
-      0,
-      0,
-      cropRect.w,
-      cropRect.h
-    );
+      <button
+        style={M.primaryBtn}
+        onClick={() => onUse(captured)}
+      >
+        USE
+      </button>
+    </>
+  )}
 
-    const final = canvas.toDataURL("image/jpeg",0.8);
-    onUse(final);
-  };
-  img.src = captured;
-}}>
-USE
-</button>
 </div>
-</>
-)}
+
+<input
+  type="file"
+  accept="image/*"
+  ref={fileInputRef}
+  style={{ display: "none" }}
+  onChange={handleFileUpload}
+/>
 <canvas ref={canvasRef} style={{display:"none"}}/>
 <button style={M.closeBtn} onClick={onClose}>✕</button>
 </div>
