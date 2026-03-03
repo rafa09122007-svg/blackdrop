@@ -1139,13 +1139,13 @@ React.useEffect(() => {
 
       streamRef.current = stream;
 
-      const checkReady = () => {
-        if (video.videoWidth > 0) {
-          setReady(true);
-        } else {
-          requestAnimationFrame(checkReady);
-        }
-      };
+      video.onloadedmetadata = () => {
+  video.play();
+};
+
+video.onplaying = () => {
+  setReady(true);
+};
 
       checkReady();
 
@@ -1359,7 +1359,19 @@ onChange={handleFileUpload}
 <div style={{display:"flex",gap:10}}>
 <button
 style={M.secondaryBtn}
-onClick={()=>setCaptured(null)}>
+onClick={() => {
+  setCaptured(null);
+  setCropRect(null);
+  setReady(false);
+
+  const video = videoRef.current;
+  if (video && streamRef.current) {
+    video.srcObject = streamRef.current;
+    video.play().then(() => {
+      setReady(true);
+    }).catch(() => {});
+  }
+}}>
 RETAKE
 </button>
 <button
