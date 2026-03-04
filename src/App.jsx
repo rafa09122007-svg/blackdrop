@@ -36,6 +36,13 @@ const GLOBAL_CSS = `
   @keyframes scanline { 0%{top:8%} 50%{top:85%} 100%{top:8%} }
   .fadeUp   { animation: fadeUp 0.35s ease both; }
   .pop      { animation: pop 0.4s cubic-bezier(.34,1.56,.64,1) both; }
+
+  /* ── iOS scroll-lock when modal open ── */
+  body.modal-open {
+    position: fixed;
+    width: 100%;
+    overflow-y: scroll; /* keeps scrollbar width so layout doesn't shift */
+  }
 `;
 
 function injectGlobalStyles() {
@@ -494,20 +501,43 @@ function TicketSuccess({ onBack }) {
   );
 }
 
-// ─── SIMPLE FILE SCANNER (upload only, no camera complexity) ──────────────────
+// ─── SCANNER MODAL ────────────────────────────────────────────────────────────
+// Fixed for mobile: true full-screen takeover that works on iOS Safari.
+// Uses a React portal-style approach via a top-level fixed div that is always
+// rendered but only visible when `open` is true, avoiding any scroll issues.
 function ScannerModal({ open, onClose, onUse }) {
   const [preview, setPreview] = useState(null);
   const [busy,    setBusy]    = useState(false);
   const fileRef = useRef(null);
+  // Remember the scroll position so we can restore it on close (iOS fix)
+  const scrollYRef = useRef(0);
 
   useEffect(() => {
     if (open) {
       setPreview(null);
-      document.body.style.overflow = "hidden";
+      // iOS Safari scroll-lock: save position, fix body
+      scrollYRef.current = window.scrollY;
+      document.body.style.position   = "fixed";
+      document.body.style.top        = `-${scrollYRef.current}px`;
+      document.body.style.left       = "0";
+      document.body.style.right      = "0";
+      document.body.style.overflow   = "hidden";
     } else {
-      document.body.style.overflow = "";
+      // Restore scroll position
+      document.body.style.position   = "";
+      document.body.style.top        = "";
+      document.body.style.left       = "";
+      document.body.style.right      = "";
+      document.body.style.overflow   = "";
+      window.scrollTo(0, scrollYRef.current);
     }
-    return () => { document.body.style.overflow = ""; };
+    return () => {
+      document.body.style.position   = "";
+      document.body.style.top        = "";
+      document.body.style.left       = "";
+      document.body.style.right      = "";
+      document.body.style.overflow   = "";
+    };
   }, [open]);
 
   function handleFile(e) {
@@ -521,90 +551,176 @@ function ScannerModal({ open, onClose, onUse }) {
 
   function handleUse() { if (preview) { onUse(preview); onClose(); } }
 
-  if (!open) return null;
-
+  // Always render the portal div; visibility is controlled by `open`.
+  // Using a portal-style fixed overlay that is truly outside the page flow.
   return (
-    <div style={{
-      position:"fixed", top:0, left:0, width:"100%", height:"100dvh",
-      zIndex:9999, background:"#000", display:"flex", flexDirection:"column",
-      overflow:"hidden", fontFamily:"'Rajdhani','Inter',sans-serif",
-    }}>
+    <div
+      aria-modal="true"
+      role="dialog"
+      style={{
+        // Always in DOM but hidden when closed — avoids iOS repaint jank
+        position:   "fixed",
+        top:        0,
+        left:       0,
+        width:      "100%",
+        height:     "100%",
+        // Use 100dvh as height for mobile browsers with dynamic toolbars
+        // (falls back to 100% if dvh unsupported)
+        zIndex:     99999,
+        background: "#000",
+        display:    "flex",
+        flexDirection: "column",
+        overflow:   "hidden",
+        fontFamily: "'Rajdhani','Inter',sans-serif",
+        // Hide/show via opacity + pointer-events so the DOM node is stable
+        opacity:          open ? 1 : 0,
+        pointerEvents:    open ? "all" : "none",
+        transition:       "opacity 0.18s ease",
+        // Ensure it sits above everything including sticky headers
+        WebkitOverflowScrolling: "touch",
+      }}
+    >
       {/* Header */}
       <div style={{
         display:"flex", alignItems:"center", justifyContent:"space-between",
-        padding:"12px 16px", background: T.card, borderBottom:`1px solid ${T.border}`,
+        padding:"12px 16px",
+        paddingTop: "max(12px, env(safe-area-inset-top))",
+        background: T.card, borderBottom:`1px solid ${T.border}`,
         flexShrink: 0,
       }}>
-        <button onClick={onClose} style={{
-          width:38, height:38, borderRadius:10, background:T.surface,
-          border:`1px solid ${T.border}`, color:T.text, cursor:"pointer", fontSize:16,
-          display:"flex", alignItems:"center", justifyContent:"center",
-        }}>✕</button>
+        <button
+          onClick={onClose}
+          style={{
+            width:44, height:44, borderRadius:10, background:T.surface,
+            border:`1px solid ${T.border}`, color:T.text, cursor:"pointer", fontSize:18,
+            display:"flex", alignItems:"center", justifyContent:"center",
+            // Larger touch target on mobile
+            WebkitTapHighlightColor: "transparent",
+          }}
+        >✕</button>
         <div style={{ color:T.gold, fontSize:14, fontWeight:700, letterSpacing:"0.12em" }}>
           📷 SCAN DOCUMENT
         </div>
-        <div style={{ width:38 }}/>
+        <div style={{ width:44 }}/>
       </div>
 
-      {/* Preview area */}
+      {/* Preview area — fills all available space between header and footer */}
       <div style={{
-        flex:1, display:"flex", alignItems:"center", justifyContent:"center",
-        background:"#060606", padding:16, overflow:"hidden",
+        flex:1,
+        display:"flex",
+        alignItems:"center",
+        justifyContent:"center",
+        background:"#060606",
+        padding: 16,
+        overflow:"hidden",
+        minHeight: 0, // important for flex shrink to work in iOS
       }}>
         {busy && (
           <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:14 }}>
-            <div style={{ width:42, height:42, border:`3px solid rgba(212,175,55,0.15)`,
-              borderTop:`3px solid ${T.gold}`, borderRadius:"50%", animation:"spin 0.7s linear infinite" }}/>
+            <div style={{
+              width:42, height:42,
+              border:`3px solid rgba(212,175,55,0.15)`,
+              borderTop:`3px solid ${T.gold}`,
+              borderRadius:"50%",
+              animation:"spin 0.7s linear infinite"
+            }}/>
             <div style={{ color:T.muted, fontSize:12 }}>LOADING...</div>
           </div>
         )}
+
         {!busy && !preview && (
-          <div style={{ textAlign:"center", color:T.muted }}>
-            <div style={{ fontSize:64, marginBottom:16 }}>📄</div>
-            <div style={{ fontSize:14 }}>Tap below to select or photograph a document</div>
+          <div
+            style={{ textAlign:"center", color:T.muted, cursor:"pointer" }}
+            onClick={() => fileRef.current?.click()}
+          >
+            <div style={{ fontSize:72, marginBottom:16, lineHeight:1 }}>📄</div>
+            <div style={{ fontSize:15, marginBottom:8 }}>Tap to photograph or choose a document</div>
+            <div style={{
+              display:"inline-flex", alignItems:"center", gap:8,
+              marginTop:12, padding:"12px 24px",
+              background:`rgba(212,175,55,0.12)`,
+              border:`1px solid ${T.goldDim}`,
+              borderRadius:10, color:T.gold,
+              fontWeight:700, fontSize:14, letterSpacing:"0.08em"
+            }}>
+              📁 Choose / Take Photo
+            </div>
           </div>
         )}
+
         {!busy && preview && (
-          <img src={preview} alt="Scan preview"
-            style={{ maxWidth:"100%", maxHeight:"100%", objectFit:"contain",
-              borderRadius:4, boxShadow:"0 0 0 1px rgba(212,175,55,0.2)" }}
+          <img
+            src={preview}
+            alt="Scan preview"
+            style={{
+              maxWidth:"100%",
+              maxHeight:"100%",
+              objectFit:"contain",
+              borderRadius:4,
+              boxShadow:"0 0 0 1px rgba(212,175,55,0.2)"
+            }}
           />
         )}
       </div>
 
       {/* Controls */}
       <div style={{
-        flexShrink:0, background:T.card, borderTop:`1px solid ${T.border}`,
-        padding:"12px 16px 20px",
+        flexShrink:0,
+        background:T.card,
+        borderTop:`1px solid ${T.border}`,
+        padding:"12px 16px",
+        paddingBottom: "max(16px, env(safe-area-inset-bottom))",
       }}>
         <div style={{ display:"flex", gap:10, marginBottom:10 }}>
-          <button onClick={() => fileRef.current?.click()} style={{
-            flex:1, height:52, background:T.surface, color:T.text,
-            border:`1px solid ${T.border}`, borderRadius:12,
-            fontWeight:600, fontSize:14, cursor:"pointer",
-            display:"flex", alignItems:"center", justifyContent:"center", gap:8,
-          }}>
+          <button
+            onClick={() => fileRef.current?.click()}
+            style={{
+              flex:1, height:56, background:T.surface, color:T.text,
+              border:`1px solid ${T.border}`, borderRadius:12,
+              fontWeight:600, fontSize:14, cursor:"pointer",
+              display:"flex", alignItems:"center", justifyContent:"center", gap:8,
+              WebkitTapHighlightColor:"transparent",
+            }}
+          >
             📁 Choose / Take Photo
           </button>
-          <button onClick={handleUse} disabled={!preview} style={{
-            flex:1, height:52, border:"none", borderRadius:12,
-            fontWeight:800, fontSize:14, letterSpacing:"0.08em",
-            background: preview ? T.gold : T.surface,
-            color: preview ? "#000" : T.muted,
-            cursor: preview ? "pointer" : "not-allowed",
-          }}>
+          <button
+            onClick={handleUse}
+            disabled={!preview}
+            style={{
+              flex:1, height:56, border:"none", borderRadius:12,
+              fontWeight:800, fontSize:14, letterSpacing:"0.08em",
+              background: preview ? T.gold : T.surface,
+              color: preview ? "#000" : T.muted,
+              cursor: preview ? "pointer" : "not-allowed",
+              WebkitTapHighlightColor:"transparent",
+            }}
+          >
             ✓ USE THIS SCAN
           </button>
         </div>
-        <button onClick={onClose} style={{
-          width:"100%", height:42, background:"transparent", color:T.muted,
-          border:`1px solid ${T.border}`, borderRadius:10,
-          fontWeight:600, fontSize:13, cursor:"pointer",
-        }}>✕ CANCEL</button>
+        <button
+          onClick={onClose}
+          style={{
+            width:"100%", height:48, background:"transparent", color:T.muted,
+            border:`1px solid ${T.border}`, borderRadius:10,
+            fontWeight:600, fontSize:13, cursor:"pointer",
+            WebkitTapHighlightColor:"transparent",
+          }}
+        >
+          ✕ CANCEL
+        </button>
       </div>
 
-      <input ref={fileRef} type="file" accept="image/*" capture="environment"
-        style={{ display:"none" }} onChange={handleFile} />
+      {/* Hidden file input — accept image/*, capture=environment triggers camera on mobile */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        style={{ display:"none" }}
+        onChange={handleFile}
+      />
     </div>
   );
 }
@@ -770,6 +886,12 @@ function SubmitTicket({ phone, onComplete, editTicket }) {
     return () => window.removeEventListener("online", syncOffline);
   }, []);
 
+  // Open scanner: save scroll position so the modal opens at top of screen
+  function openScanner(target) {
+    setScanTarget(target);
+    setScanOpen(true);
+  }
+
   const sectionStyle = {
     background: T.surface, borderRadius: 10, padding:"16px",
     border:`1px solid ${T.border}`, marginBottom: 12
@@ -779,346 +901,348 @@ function SubmitTicket({ phone, onComplete, editTicket }) {
     fontSize: 13, fontWeight: 700, letterSpacing:"0.15em", marginBottom: 14
   };
 
-  // ─── THE FIX: Wrapping PageShell & ScannerModal inside a Fragment ───
   return (
-    <>
-      <PageShell maxW={520}>
-        <div style={{ display:"flex", alignItems:"center", gap: 12, marginBottom: 20 }}>
-          <div>
-            <div style={{ color: T.gold, fontFamily:"'Rajdhani',sans-serif",
-              fontSize: 20, fontWeight: 700, letterSpacing:"0.12em" }}>
-              {editTicket ? "EDIT & RESUBMIT" : "NEW FIELD TICKET"}
-            </div>
-            <div style={{ color: T.muted, fontSize: 11 }}>
-              {editTicket ? `Editing ${submissionId}` : "Complete all required fields"}
-            </div>
+    <PageShell maxW={520}>
+      <div style={{ display:"flex", alignItems:"center", gap: 12, marginBottom: 20 }}>
+        <div>
+          <div style={{ color: T.gold, fontFamily:"'Rajdhani',sans-serif",
+            fontSize: 20, fontWeight: 700, letterSpacing:"0.12em" }}>
+            {editTicket ? "EDIT & RESUBMIT" : "NEW FIELD TICKET"}
+          </div>
+          <div style={{ color: T.muted, fontSize: 11 }}>
+            {editTicket ? `Editing ${submissionId}` : "Complete all required fields"}
           </div>
         </div>
+      </div>
 
-        <div style={{ marginBottom: 20, position:"sticky", top:0, zIndex:10,
-          background: T.card, paddingTop: 4, paddingBottom: 8 }}>
-          <div style={{ display:"flex", justifyContent:"space-between",
-            fontSize: 11, color: T.muted, marginBottom: 6 }}>
-            <span>FORM COMPLETION</span>
-            <span style={{ color: progress===100 ? T.success : T.gold, fontWeight: 700 }}>
-              {progress}%
-            </span>
-          </div>
-          <div style={{ height: 4, background: T.surface, borderRadius: 99 }}>
-            <div style={{
-              height:"100%", borderRadius: 99,
-              background: progress===100 ? T.success : T.gold,
-              width:`${progress}%`, transition:"width 0.3s ease"
-            }}/>
-          </div>
+      <div style={{ marginBottom: 20, position:"sticky", top:0, zIndex:10,
+        background: T.card, paddingTop: 4, paddingBottom: 8 }}>
+        <div style={{ display:"flex", justifyContent:"space-between",
+          fontSize: 11, color: T.muted, marginBottom: 6 }}>
+          <span>FORM COMPLETION</span>
+          <span style={{ color: progress===100 ? T.success : T.gold, fontWeight: 700 }}>
+            {progress}%
+          </span>
         </div>
-
-        {/* ── JOB INFO ── */}
-        <div style={sectionStyle}>
-          <div style={sectionTitle}>📋 JOB INFORMATION</div>
-
-          <Label text="Client Organization" required/>
-          <Select value={form.client} onChange={e=>update("client",e.target.value)}>
-            <option value="">Select client…</option>
-            {["Exxon","Oxy","Western Midstream","Chevron","Other"].map(c=>(
-              <option key={c}>{c}</option>
-            ))}
-          </Select>
-
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap: 12 }}>
-            <div>
-              <Label text="Field Ticket #" required/>
-              <Input value={form.fieldTicket} onChange={e=>update("fieldTicket",e.target.value)}/>
-            </div>
-            <div>
-              <Label text={dispatchLabel} required/>
-              <Input value={form.dispatch} onChange={e=>update("dispatch",e.target.value)}/>
-            </div>
-          </div>
-
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap: 12 }}>
-            <div>
-              <Label text="Unit / Truck #" required/>
-              <Input value={form.unit} onChange={e=>update("unit",e.target.value)}/>
-            </div>
-            <div>
-              <Label text="Driver Name" required/>
-              <Input value={form.driver} onChange={e=>update("driver",e.target.value)}/>
-            </div>
-          </div>
-
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap: 12 }}>
-            <div>
-              <Label text="Work Date" required/>
-              <Input type="date" value={form.workDate} onChange={e=>update("workDate",e.target.value)}/>
-            </div>
-            <div>
-              <Label text="Well / Lease" required/>
-              <Input value={form.wellLease} onChange={e=>update("wellLease",e.target.value)}/>
-            </div>
-          </div>
-
-          <Label text="Notes / Description"/>
-          <Textarea placeholder="Add job specifics…" value={form.notes}
-            onChange={e=>update("notes",e.target.value)}/>
-
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap: 12, marginTop: 4 }}>
-            <div>
-              <Label text="Start Time"/>
-              <Input type="time" value={form.startTime} onChange={e=>update("startTime",e.target.value)}/>
-            </div>
-            <div>
-              <Label text="End Time"/>
-              <Input type="time" value={form.endTime} onChange={e=>update("endTime",e.target.value)}/>
-            </div>
-          </div>
-
-          <Label text="Hourly Rate ($)"/>
-          <Input
-            type="number" placeholder="e.g. 85"
-            value={form.hourlyRate}
-            onChange={e=>update("hourlyRate",e.target.value)}
-          />
-
-          {form.startTime && form.endTime && (() => {
-            const [sh,sm] = form.startTime.split(":").map(Number);
-            const [eh,em] = form.endTime.split(":").map(Number);
-            let mins = (eh*60+em) - (sh*60+sm);
-            if (mins < 0) mins += 1440;
-            const hrs = (mins/60).toFixed(2);
-            const total = form.hourlyRate ? (parseFloat(hrs) * parseFloat(form.hourlyRate)).toFixed(2) : null;
-            return (
-              <div style={{
-                marginTop: 10, padding:"10px 14px", background: "rgba(212,175,55,0.08)",
-                border:"1px solid rgba(212,175,55,0.25)", borderRadius: 8,
-                display:"flex", justifyContent:"space-between", alignItems:"center"
-              }}>
-                <div>
-                  <div style={{ color: T.muted, fontSize: 10 }}>TOTAL HOURS</div>
-                  <div style={{ color: T.gold, fontFamily:"'Space Mono',monospace", fontWeight:700, fontSize:18 }}>{hrs} hrs</div>
-                </div>
-                {total && (
-                  <div style={{ textAlign:"right" }}>
-                    <div style={{ color: T.muted, fontSize: 10 }}>HOURS TOTAL</div>
-                    <div style={{ color: T.success, fontFamily:"'Space Mono',monospace", fontWeight:700, fontSize:18 }}>${total}</div>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
+        <div style={{ height: 4, background: T.surface, borderRadius: 99 }}>
+          <div style={{
+            height:"100%", borderRadius: 99,
+            background: progress===100 ? T.success : T.gold,
+            width:`${progress}%`, transition:"width 0.3s ease"
+          }}/>
         </div>
+      </div>
 
-        {/* ── FIELD TICKET PHOTO ── */}
-        <div style={sectionStyle}>
-          <div style={sectionTitle}>📄 FIELD TICKET PHOTO <span style={{color:T.danger}}>✱</span></div>
-          <div onClick={() => { setScanTarget({type:"field"}); setScanOpen(true); }}
-            style={{
-              border:`1px dashed ${form.fieldTicketImage ? T.goldDim : T.border}`,
-              borderRadius: 8, padding: 20, cursor:"pointer", textAlign:"center",
-              background: T.bg, transition:"border-color 0.2s"
-            }}>
-            {form.fieldTicketImage
-              ? <img src={form.fieldTicketImage} style={{ width:"100%", borderRadius: 6 }} alt=""/>
-              : <div style={{ color: T.muted, fontSize: 13 }}>📄 Tap to scan or upload ticket</div>
-            }
-          </div>
-          {form.fieldTicketImage && (
-            <button onClick={()=>update("fieldTicketImage","")} style={{
-              marginTop: 8, background:"transparent", border:"none",
-              color: T.danger, fontSize: 12, cursor:"pointer"
-            }}>✕ Remove photo</button>
-          )}
-        </div>
+      {/* ── JOB INFO ── */}
+      <div style={sectionStyle}>
+        <div style={sectionTitle}>📋 JOB INFORMATION</div>
 
-        {/* ── LOAD MANIFEST ── */}
-        <div style={{ ...sectionStyle }}>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: 14 }}>
-            <div style={sectionTitle}>🚛 LOAD MANIFEST</div>
-            <div style={{
-              background:`rgba(212,175,55,0.1)`, border:`1px solid ${T.goldDim}`,
-              borderRadius: 8, padding:"4px 12px", color: T.gold,
-              fontFamily:"'Space Mono',monospace", fontSize: 13, fontWeight: 700
-            }}>
-              {totalBBLS.toFixed(2)} BBL
-            </div>
-          </div>
-
-          {loads.map((load, idx) => (
-            <div key={load.id} style={{
-              background: T.bg, borderRadius: 8, padding: 14,
-              border:`1px solid ${T.border}`, marginBottom: 10,
-              borderLeft:`3px solid ${T.gold}`
-            }}>
-              <div style={{ display:"flex", alignItems:"center", gap: 8, marginBottom: 12 }}>
-                <span style={{
-                  background: T.gold, color:"#000", padding:"2px 8px",
-                  borderRadius: 4, fontWeight: 800, fontSize: 11, fontFamily:"'Rajdhani',sans-serif"
-                }}>LOAD {String(idx+1).padStart(2,"0")}</span>
-                {loads.length > 1 && (
-                  <button onClick={()=>deleteLoad(idx)} style={{
-                    marginLeft:"auto", background:"transparent",
-                    border:`1px solid ${T.border}`, color: T.danger,
-                    borderRadius: 6, padding:"2px 8px", cursor:"pointer", fontSize: 12
-                  }}>✕</button>
-                )}
-              </div>
-
-              {isExxon && (
-                <>
-                  <Label text="Gemini Dispatch Ref #" required/>
-                  <Input value={load.geminiRef} onChange={e=>updateLoad(idx,"geminiRef",e.target.value)}/>
-                </>
-              )}
-
-              <Label text="Load Ticket Number" required/>
-              <Input value={load.loadTicket} onChange={e=>updateLoad(idx,"loadTicket",e.target.value)}/>
-
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap: 12 }}>
-                <div>
-                  <Label text="Fluid Type"/>
-                  <Select value={load.fluid} onChange={e=>updateLoad(idx,"fluid",e.target.value)}>
-                    {["Fresh Water","Brine Water","Disposal Water","Manifest"].map(f=>(
-                      <option key={f}>{f}</option>
-                    ))}
-                  </Select>
-                </div>
-                <div>
-                  <Label text="BBLs" required/>
-                  <Input type="number" value={load.bbls}
-                    onChange={e=>updateLoad(idx,"bbls",e.target.value)}/>
-                </div>
-              </div>
-
-              <div style={{ display:"flex", flexWrap:"wrap", gap: 6, marginTop: 8 }}>
-                {[90,100,120,130,150,200].map(q=>(
-                  <button key={q} onClick={()=>updateLoad(idx,"bbls",String(q))}
-                    style={{
-                      padding:"5px 10px", borderRadius: 6, fontSize: 12, cursor:"pointer",
-                      background: String(load.bbls)===String(q) ? `rgba(212,175,55,0.2)` : T.surface,
-                      border:`1px solid ${String(load.bbls)===String(q) ? T.gold : T.border}`,
-                      color: String(load.bbls)===String(q) ? T.gold : T.muted,
-                      transition:"all 0.15s"
-                    }}>{q}</button>
-                ))}
-              </div>
-
-              <Label text="Verification Image"/>
-              <div onClick={()=>{ setScanTarget({type:"load",index:idx}); setScanOpen(true); }}
-                style={{
-                  border:`1px dashed ${load.verificationImage ? T.goldDim : T.border}`,
-                  borderRadius: 8, padding: load.verificationImage ? 0 : 14,
-                  cursor:"pointer", textAlign:"center", background: T.card, overflow:"hidden"
-                }}>
-                {load.verificationImage
-                  ? <img src={load.verificationImage} style={{ width:"100%", display:"block" }} alt=""/>
-                  : <div style={{ color: T.muted, fontSize: 12 }}>🧾 Scan load ticket</div>
-                }
-              </div>
-
-              {load.fluid === "Manifest" && (
-                <div style={{
-                  marginTop: 10, border:`1px solid ${T.border}`, borderRadius: 8, padding: 12
-                }}>
-                  <div style={{ display:"flex", justifyContent:"space-between",
-                    color: T.muted, fontSize: 10, marginBottom: 10 }}>
-                    <span>MANIFEST OPERATIONS</span>
-                    <span style={{ color: T.danger }}>REQUIRED SELECTION</span>
-                  </div>
-                  <div style={{ display:"flex", gap: 8 }}>
-                    {[["washOut","WASH OUT"],["unload","UNLOAD"]].map(([op,label])=>(
-                      <button key={op} onClick={()=>toggleOp(idx,op)} style={{
-                        flex:1, padding:"9px 0", borderRadius: 8, fontWeight: 700,
-                        fontSize: 12, cursor:"pointer", letterSpacing:"0.05em",
-                        border:`1px solid ${load.manifestOps[op] ? T.gold : T.border}`,
-                        background: load.manifestOps[op] ? `rgba(212,175,55,0.12)` : "transparent",
-                        color: load.manifestOps[op] ? T.gold : T.muted,
-                        transition:"all 0.15s"
-                      }}>{label}</button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
+        <Label text="Client Organization" required/>
+        <Select value={form.client} onChange={e=>update("client",e.target.value)}>
+          <option value="">Select client…</option>
+          {["Exxon","Oxy","Western Midstream","Chevron","Other"].map(c=>(
+            <option key={c}>{c}</option>
           ))}
+        </Select>
 
-          <button onClick={addLoad} style={{
-            width:"100%", padding: 12, border:`1px dashed ${T.border}`,
-            borderRadius: 8, cursor:"pointer", textAlign:"center",
-            background:"transparent", color: T.muted, fontSize: 13,
-            transition:"all 0.15s"
-          }}
-          onMouseEnter={e=>{e.currentTarget.style.borderColor=T.borderHi; e.currentTarget.style.color=T.text;}}
-          onMouseLeave={e=>{e.currentTarget.style.borderColor=T.border; e.currentTarget.style.color=T.muted;}}
-          >+ ADD ADDITIONAL LOAD</button>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap: 12 }}>
+          <div>
+            <Label text="Field Ticket #" required/>
+            <Input value={form.fieldTicket} onChange={e=>update("fieldTicket",e.target.value)}/>
+          </div>
+          <div>
+            <Label text={dispatchLabel} required/>
+            <Input value={form.dispatch} onChange={e=>update("dispatch",e.target.value)}/>
+          </div>
         </div>
 
-        {/* ── SIGNATURE ── */}
-        <div style={sectionStyle}>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: 10 }}>
-            <div style={sectionTitle}>✍ OPERATOR SIGNATURE <span style={{color:T.danger}}>✱</span></div>
-            {hasSignature && (
-              <button onClick={clearSig} style={{
-                background:"transparent", border:"none",
-                color: T.danger, fontSize: 12, cursor:"pointer"
-              }}>✕ Clear</button>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap: 12 }}>
+          <div>
+            <Label text="Unit / Truck #" required/>
+            <Input value={form.unit} onChange={e=>update("unit",e.target.value)}/>
+          </div>
+          <div>
+            <Label text="Driver Name" required/>
+            <Input value={form.driver} onChange={e=>update("driver",e.target.value)}/>
+          </div>
+        </div>
+
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap: 12 }}>
+          <div>
+            <Label text="Work Date" required/>
+            <Input type="date" value={form.workDate} onChange={e=>update("workDate",e.target.value)}/>
+          </div>
+          <div>
+            <Label text="Well / Lease" required/>
+            <Input value={form.wellLease} onChange={e=>update("wellLease",e.target.value)}/>
+          </div>
+        </div>
+
+        <Label text="Notes / Description"/>
+        <Textarea placeholder="Add job specifics…" value={form.notes}
+          onChange={e=>update("notes",e.target.value)}/>
+
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap: 12, marginTop: 4 }}>
+          <div>
+            <Label text="Start Time"/>
+            <Input type="time" value={form.startTime} onChange={e=>update("startTime",e.target.value)}/>
+          </div>
+          <div>
+            <Label text="End Time"/>
+            <Input type="time" value={form.endTime} onChange={e=>update("endTime",e.target.value)}/>
+          </div>
+        </div>
+
+        <Label text="Hourly Rate ($)"/>
+        <Input
+          type="number" placeholder="e.g. 85"
+          value={form.hourlyRate}
+          onChange={e=>update("hourlyRate",e.target.value)}
+        />
+
+        {form.startTime && form.endTime && (() => {
+          const [sh,sm] = form.startTime.split(":").map(Number);
+          const [eh,em] = form.endTime.split(":").map(Number);
+          let mins = (eh*60+em) - (sh*60+sm);
+          if (mins < 0) mins += 1440;
+          const hrs = (mins/60).toFixed(2);
+          const total = form.hourlyRate ? (parseFloat(hrs) * parseFloat(form.hourlyRate)).toFixed(2) : null;
+          return (
+            <div style={{
+              marginTop: 10, padding:"10px 14px", background: "rgba(212,175,55,0.08)",
+              border:"1px solid rgba(212,175,55,0.25)", borderRadius: 8,
+              display:"flex", justifyContent:"space-between", alignItems:"center"
+            }}>
+              <div>
+                <div style={{ color: T.muted, fontSize: 10 }}>TOTAL HOURS</div>
+                <div style={{ color: T.gold, fontFamily:"'Space Mono',monospace", fontWeight:700, fontSize:18 }}>{hrs} hrs</div>
+              </div>
+              {total && (
+                <div style={{ textAlign:"right" }}>
+                  <div style={{ color: T.muted, fontSize: 10 }}>HOURS TOTAL</div>
+                  <div style={{ color: T.success, fontFamily:"'Space Mono',monospace", fontWeight:700, fontSize:18 }}>${total}</div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </div>
+
+      {/* ── FIELD TICKET PHOTO ── */}
+      <div style={sectionStyle}>
+        <div style={sectionTitle}>📄 FIELD TICKET PHOTO <span style={{color:T.danger}}>✱</span></div>
+        <div
+          onClick={() => openScanner({ type:"field" })}
+          style={{
+            border:`1px dashed ${form.fieldTicketImage ? T.goldDim : T.border}`,
+            borderRadius: 8, padding: 20, cursor:"pointer", textAlign:"center",
+            background: T.bg, transition:"border-color 0.2s",
+            WebkitTapHighlightColor:"transparent",
+          }}
+        >
+          {form.fieldTicketImage
+            ? <img src={form.fieldTicketImage} style={{ width:"100%", borderRadius: 6 }} alt=""/>
+            : <div style={{ color: T.muted, fontSize: 13 }}>📄 Tap to scan or upload ticket</div>
+          }
+        </div>
+        {form.fieldTicketImage && (
+          <button onClick={()=>update("fieldTicketImage","")} style={{
+            marginTop: 8, background:"transparent", border:"none",
+            color: T.danger, fontSize: 12, cursor:"pointer"
+          }}>✕ Remove photo</button>
+        )}
+      </div>
+
+      {/* ── LOAD MANIFEST ── */}
+      <div style={{ ...sectionStyle }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: 14 }}>
+          <div style={sectionTitle}>🚛 LOAD MANIFEST</div>
+          <div style={{
+            background:`rgba(212,175,55,0.1)`, border:`1px solid ${T.goldDim}`,
+            borderRadius: 8, padding:"4px 12px", color: T.gold,
+            fontFamily:"'Space Mono',monospace", fontSize: 13, fontWeight: 700
+          }}>
+            {totalBBLS.toFixed(2)} BBL
+          </div>
+        </div>
+
+        {loads.map((load, idx) => (
+          <div key={load.id} style={{
+            background: T.bg, borderRadius: 8, padding: 14,
+            border:`1px solid ${T.border}`, marginBottom: 10,
+            borderLeft:`3px solid ${T.gold}`
+          }}>
+            <div style={{ display:"flex", alignItems:"center", gap: 8, marginBottom: 12 }}>
+              <span style={{
+                background: T.gold, color:"#000", padding:"2px 8px",
+                borderRadius: 4, fontWeight: 800, fontSize: 11, fontFamily:"'Rajdhani',sans-serif"
+              }}>LOAD {String(idx+1).padStart(2,"0")}</span>
+              {loads.length > 1 && (
+                <button onClick={()=>deleteLoad(idx)} style={{
+                  marginLeft:"auto", background:"transparent",
+                  border:`1px solid ${T.border}`, color: T.danger,
+                  borderRadius: 6, padding:"2px 8px", cursor:"pointer", fontSize: 12
+                }}>✕</button>
+              )}
+            </div>
+
+            {isExxon && (
+              <>
+                <Label text="Gemini Dispatch Ref #" required/>
+                <Input value={load.geminiRef} onChange={e=>updateLoad(idx,"geminiRef",e.target.value)}/>
+              </>
+            )}
+
+            <Label text="Load Ticket Number" required/>
+            <Input value={load.loadTicket} onChange={e=>updateLoad(idx,"loadTicket",e.target.value)}/>
+
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap: 12 }}>
+              <div>
+                <Label text="Fluid Type"/>
+                <Select value={load.fluid} onChange={e=>updateLoad(idx,"fluid",e.target.value)}>
+                  {["Fresh Water","Brine Water","Disposal Water","Manifest"].map(f=>(
+                    <option key={f}>{f}</option>
+                  ))}
+                </Select>
+              </div>
+              <div>
+                <Label text="BBLs" required/>
+                <Input type="number" value={load.bbls}
+                  onChange={e=>updateLoad(idx,"bbls",e.target.value)}/>
+              </div>
+            </div>
+
+            <div style={{ display:"flex", flexWrap:"wrap", gap: 6, marginTop: 8 }}>
+              {[90,100,120,130,150,200].map(q=>(
+                <button key={q} onClick={()=>updateLoad(idx,"bbls",String(q))}
+                  style={{
+                    padding:"5px 10px", borderRadius: 6, fontSize: 12, cursor:"pointer",
+                    background: String(load.bbls)===String(q) ? `rgba(212,175,55,0.2)` : T.surface,
+                    border:`1px solid ${String(load.bbls)===String(q) ? T.gold : T.border}`,
+                    color: String(load.bbls)===String(q) ? T.gold : T.muted,
+                    transition:"all 0.15s"
+                  }}>{q}</button>
+              ))}
+            </div>
+
+            <Label text="Verification Image"/>
+            <div
+              onClick={() => openScanner({ type:"load", index:idx })}
+              style={{
+                border:`1px dashed ${load.verificationImage ? T.goldDim : T.border}`,
+                borderRadius: 8, padding: load.verificationImage ? 0 : 14,
+                cursor:"pointer", textAlign:"center", background: T.card, overflow:"hidden",
+                WebkitTapHighlightColor:"transparent",
+              }}
+            >
+              {load.verificationImage
+                ? <img src={load.verificationImage} style={{ width:"100%", display:"block" }} alt=""/>
+                : <div style={{ color: T.muted, fontSize: 12 }}>🧾 Scan load ticket</div>
+              }
+            </div>
+
+            {load.fluid === "Manifest" && (
+              <div style={{
+                marginTop: 10, border:`1px solid ${T.border}`, borderRadius: 8, padding: 12
+              }}>
+                <div style={{ display:"flex", justifyContent:"space-between",
+                  color: T.muted, fontSize: 10, marginBottom: 10 }}>
+                  <span>MANIFEST OPERATIONS</span>
+                  <span style={{ color: T.danger }}>REQUIRED SELECTION</span>
+                </div>
+                <div style={{ display:"flex", gap: 8 }}>
+                  {[["washOut","WASH OUT"],["unload","UNLOAD"]].map(([op,label])=>(
+                    <button key={op} onClick={()=>toggleOp(idx,op)} style={{
+                      flex:1, padding:"9px 0", borderRadius: 8, fontWeight: 700,
+                      fontSize: 12, cursor:"pointer", letterSpacing:"0.05em",
+                      border:`1px solid ${load.manifestOps[op] ? T.gold : T.border}`,
+                      background: load.manifestOps[op] ? `rgba(212,175,55,0.12)` : "transparent",
+                      color: load.manifestOps[op] ? T.gold : T.muted,
+                      transition:"all 0.15s"
+                    }}>{label}</button>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
-          <div style={{ borderRadius: 8, overflow:"hidden", border:`1px solid ${T.border}` }}>
-            <canvas ref={sigRef} width={900} height={280}
-              style={{ width:"100%", height: 140, background:"#fff", display:"block", touchAction:"none" }}
-              onMouseDown={startDraw} onMouseMove={draw} onMouseUp={endDraw} onMouseLeave={endDraw}
-              onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={endDraw}
-            />
-          </div>
-          {!hasSignature && (
-            <div style={{ color: T.muted, fontSize: 11, textAlign:"center", marginTop: 6 }}>
-              Sign above with your finger or mouse
-            </div>
+        ))}
+
+        <button onClick={addLoad} style={{
+          width:"100%", padding: 12, border:`1px dashed ${T.border}`,
+          borderRadius: 8, cursor:"pointer", textAlign:"center",
+          background:"transparent", color: T.muted, fontSize: 13,
+          transition:"all 0.15s"
+        }}
+        onMouseEnter={e=>{e.currentTarget.style.borderColor=T.borderHi; e.currentTarget.style.color=T.text;}}
+        onMouseLeave={e=>{e.currentTarget.style.borderColor=T.border; e.currentTarget.style.color=T.muted;}}
+        >+ ADD ADDITIONAL LOAD</button>
+      </div>
+
+      {/* ── SIGNATURE ── */}
+      <div style={sectionStyle}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: 10 }}>
+          <div style={sectionTitle}>✍ OPERATOR SIGNATURE <span style={{color:T.danger}}>✱</span></div>
+          {hasSignature && (
+            <button onClick={clearSig} style={{
+              background:"transparent", border:"none",
+              color: T.danger, fontSize: 12, cursor:"pointer"
+            }}>✕ Clear</button>
           )}
         </div>
-
-        {/* ── VOLUME SUMMARY ── */}
-        <div style={{
-          ...sectionStyle, display:"flex", justifyContent:"space-between", alignItems:"center"
-        }}>
-          <div style={{ color: T.muted, fontSize: 12 }}>
-            <div>TOTAL LOADS</div>
-            <div style={{ color: T.text, fontWeight: 700, fontSize: 18, marginTop: 2 }}>{loads.length}</div>
-          </div>
-          <div style={{ textAlign:"right" }}>
-            <div style={{ color: T.muted, fontSize: 12 }}>TOTAL VOLUME</div>
-            <div style={{
-              color: T.gold, fontFamily:"'Space Mono',monospace",
-              fontSize: 28, fontWeight: 700, marginTop: 2
-            }}>{totalBBLS.toFixed(2)} <span style={{ fontSize: 14 }}>BBL</span></div>
-          </div>
+        <div style={{ borderRadius: 8, overflow:"hidden", border:`1px solid ${T.border}` }}>
+          <canvas ref={sigRef} width={900} height={280}
+            style={{ width:"100%", height: 140, background:"#fff", display:"block", touchAction:"none" }}
+            onMouseDown={startDraw} onMouseMove={draw} onMouseUp={endDraw} onMouseLeave={endDraw}
+            onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={endDraw}
+          />
         </div>
-
-        {submitError && (
-          <div style={{ color: T.danger, fontSize: 12, textAlign:"center", marginBottom: 10 }}>
-            ⚠ {submitError}
+        {!hasSignature && (
+          <div style={{ color: T.muted, fontSize: 11, textAlign:"center", marginTop: 6 }}>
+            Sign above with your finger or mouse
           </div>
         )}
+      </div>
 
-        <GoldBtn disabled={!isComplete} loading={isSubmitting} onClick={handleSubmit}>
-          {isSubmitting ? "SUBMITTING…" : isComplete ? "✓ SUBMIT FINAL TICKET" : `COMPLETE FORM (${progress}%)`}
-        </GoldBtn>
+      {/* ── VOLUME SUMMARY ── */}
+      <div style={{
+        ...sectionStyle, display:"flex", justifyContent:"space-between", alignItems:"center"
+      }}>
+        <div style={{ color: T.muted, fontSize: 12 }}>
+          <div>TOTAL LOADS</div>
+          <div style={{ color: T.text, fontWeight: 700, fontSize: 18, marginTop: 2 }}>{loads.length}</div>
+        </div>
+        <div style={{ textAlign:"right" }}>
+          <div style={{ color: T.muted, fontSize: 12 }}>TOTAL VOLUME</div>
+          <div style={{
+            color: T.gold, fontFamily:"'Space Mono',monospace",
+            fontSize: 28, fontWeight: 700, marginTop: 2
+          }}>{totalBBLS.toFixed(2)} <span style={{ fontSize: 14 }}>BBL</span></div>
+        </div>
+      </div>
 
-      </PageShell>
+      {submitError && (
+        <div style={{ color: T.danger, fontSize: 12, textAlign:"center", marginBottom: 10 }}>
+          ⚠ {submitError}
+        </div>
+      )}
 
-      {/* ─── SCANNER MODAL LIVES OUTSIDE THE FADEUP CONTAINER NOW ─── */}
+      <GoldBtn disabled={!isComplete} loading={isSubmitting} onClick={handleSubmit}>
+        {isSubmitting ? "SUBMITTING…" : isComplete ? "✓ SUBMIT FINAL TICKET" : `COMPLETE FORM (${progress}%)`}
+      </GoldBtn>
+
+      {/* Scanner modal — rendered once, always in DOM, shown/hidden via opacity */}
       <ScannerModal
         open={scanOpen}
-        onClose={()=>setScanOpen(false)}
+        onClose={() => { setScanOpen(false); setScanTarget(null); }}
         onUse={img => {
           if (scanTarget?.type === "field") update("fieldTicketImage", img);
           if (scanTarget?.type === "load") {
-            setLoads(p=>{ const c=[...p]; c[scanTarget.index].verificationImage=img; return c; });
+            setLoads(p => { const c=[...p]; c[scanTarget.index].verificationImage=img; return c; });
           }
           setScanOpen(false); setScanTarget(null);
         }}
       />
-    </>
+    </PageShell>
   );
 }
 
