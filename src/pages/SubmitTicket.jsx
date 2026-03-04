@@ -291,7 +291,7 @@ useEffect(() => {
 
     for (let ticket of pending) {
       try { // also add updated here
-        await fetch("https://script.google.com/macros/s/AKfycbwZ4HWc7_V8wEIxI_wvTpdTYq9KGoLoYNgE1JZGrijFMGxJydCnbmoIFi-j1bbLB0CKJQ/exec", {
+        await fetch("https://script.google.com/macros/s/AKfycbwDJZilqySP8zZBHetfQyd-xloh3dz_eKbpwwkLiKohqeQDIRPM8L_H6AjtTU7CSYaT/exec", {
           method: "POST",
           headers: { "Content-Type": "text/plain;charset=utf-8" },
           body: JSON.stringify(ticket)
