@@ -526,17 +526,214 @@ function TicketSuccess({ onBack }) {
   );
 }
 
-// ─── SCANNER MODAL ────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// DOCSCAN ENGINE — pure Canvas/JS image processing (no external libs)
+// Steps: Grayscale → Gaussian Blur → Sobel Edges → Corner Detection →
+//        Perspective Warp → Adaptive Threshold / Colour Enhance
+// ═══════════════════════════════════════════════════════════════════════════
+const DocScan = {
+  // Step 1 — Grayscale (ITU-R BT.601 weighted luminance)
+  toGrayscale(imageData) {
+    const { data, width, height } = imageData;
+    const gray = new Uint8ClampedArray(width * height);
+    for (let i = 0; i < gray.length; i++) {
+      gray[i] = Math.round(0.299*data[i*4] + 0.587*data[i*4+1] + 0.114*data[i*4+2]);
+    }
+    return gray;
+  },
+
+  // Step 2 — 5×5 Gaussian blur (σ≈1.0) — suppresses noise before edge detection
+  gaussianBlur(gray, width, height) {
+    const k = [2,4,5,4,2, 4,9,12,9,4, 5,12,15,12,5, 4,9,12,9,4, 2,4,5,4,2];
+    const out = new Uint8ClampedArray(width * height);
+    for (let y = 2; y < height-2; y++) {
+      for (let x = 2; x < width-2; x++) {
+        let sum = 0, ki = 0;
+        for (let ky = -2; ky <= 2; ky++)
+          for (let kx = -2; kx <= 2; kx++)
+            sum += gray[(y+ky)*width+(x+kx)] * k[ki++];
+        out[y*width+x] = Math.round(sum / 159);
+      }
+    }
+    return out;
+  },
+
+  // Step 3 — Sobel edge detection + auto-threshold + dilation
+  detectEdges(blurred, width, height) {
+    const mag = new Float32Array(width * height);
+    let maxMag = 0;
+    for (let y = 1; y < height-1; y++) {
+      for (let x = 1; x < width-1; x++) {
+        const gx = -blurred[(y-1)*width+(x-1)] + blurred[(y-1)*width+(x+1)]
+                   -2*blurred[y*width+(x-1)]   + 2*blurred[y*width+(x+1)]
+                   -blurred[(y+1)*width+(x-1)] + blurred[(y+1)*width+(x+1)];
+        const gy = -blurred[(y-1)*width+(x-1)] - 2*blurred[(y-1)*width+x] - blurred[(y-1)*width+(x+1)]
+                   +blurred[(y+1)*width+(x-1)] + 2*blurred[(y+1)*width+x] + blurred[(y+1)*width+(x+1)];
+        mag[y*width+x] = Math.sqrt(gx*gx+gy*gy);
+        if (mag[y*width+x] > maxMag) maxMag = mag[y*width+x];
+      }
+    }
+    const thresh = maxMag * 0.20;
+    const edges  = new Uint8ClampedArray(width * height);
+    for (let i = 0; i < mag.length; i++) edges[i] = mag[i] > thresh ? 255 : 0;
+    // Dilate to close outline gaps
+    const d = new Uint8ClampedArray(width * height);
+    for (let y = 1; y < height-1; y++)
+      for (let x = 1; x < width-1; x++) {
+        const n = y*width+x;
+        if (edges[n]||edges[n-1]||edges[n+1]||edges[n-width]||edges[n+width]) d[n]=255;
+      }
+    return d;
+  },
+
+  // Step 3b — Find document corners (TL, TR, BR, BL) from edge map
+  findDocumentCorners(edges, width, height) {
+    let minX=width,maxX=0,minY=height,maxY=0,count=0;
+    for (let y=0;y<height;y++) for (let x=0;x<width;x++) {
+      if (edges[y*width+x]===255) {
+        if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;count++;
+      }
+    }
+    if ((maxX-minX)*(maxY-minY) < width*height*0.15 || count<500) return null;
+    const mx=(minX+maxX)/2, my=(minY+maxY)/2;
+    function best(xs,ys,score){let b=null,bs=-Infinity;for(const y of ys)for(const x of xs){if(edges[y*width+x]===255){const s=score(x,y);if(s>bs){bs=s;b=[x,y];}}}return b||[xs[0],ys[0]];}
+    const yt=[...Array(Math.floor(my)).keys()], yb=[...Array(height-Math.ceil(my)).keys()].map(i=>Math.ceil(my)+i);
+    const xl=[...Array(Math.floor(mx)).keys()], xr=[...Array(width-Math.ceil(mx)).keys()].map(i=>Math.ceil(mx)+i);
+    return [best(xl,yt,(x,y)=>-(x+y)),best(xr,yt,(x,y)=>x-y),best(xr,yb,(x,y)=>x+y),best(xl,yb,(x,y)=>-x+y)];
+  },
+
+  // Step 4 — Perspective warp via homography (bilinear interpolation)
+  perspectiveWarp(srcData, srcW, srcH, corners) {
+    const [tl,tr,br,bl] = corners;
+    const outW = Math.round(Math.max(Math.hypot(tr[0]-tl[0],tr[1]-tl[1]),Math.hypot(br[0]-bl[0],br[1]-bl[1])));
+    const outH = Math.round(Math.max(Math.hypot(bl[0]-tl[0],bl[1]-tl[1]),Math.hypot(br[0]-tr[0],br[1]-tr[1])));
+    if (outW<10||outH<10) return null;
+    const src=[tl[0],tl[1],tr[0],tr[1],br[0],br[1],bl[0],bl[1]];
+    const dst=[0,0,outW-1,0,outW-1,outH-1,0,outH-1];
+    const A=[];
+    for(let i=0;i<4;i++){const[sx,sy]=[src[i*2],src[i*2+1]],[dx,dy]=[dst[i*2],dst[i*2+1]];A.push([-dx,-dy,-1,0,0,0,sx*dx,sx*dy,sx]);A.push([0,0,0,-dx,-dy,-1,sy*dx,sy*dy,sy]);}
+    const h=this._solveH(A); if(!h) return null;
+    const out=new Uint8ClampedArray(outW*outH*4);
+    for(let dy=0;dy<outH;dy++) for(let dx=0;dx<outW;dx++){
+      const w=h[6]*dx+h[7]*dy+h[8], sx=(h[0]*dx+h[1]*dy+h[2])/w, sy=(h[3]*dx+h[4]*dy+h[5])/w;
+      const x0=Math.floor(sx),y0=Math.floor(sy),x1=x0+1,y1=y0+1,fx=sx-x0,fy=sy-y0;
+      if(x0<0||y0<0||x1>=srcW||y1>=srcH) continue;
+      const i00=(y0*srcW+x0)*4,i10=(y0*srcW+x1)*4,i01=(y1*srcW+x0)*4,i11=(y1*srcW+x1)*4,oi=(dy*outW+dx)*4;
+      for(let c=0;c<3;c++) out[oi+c]=Math.round(srcData[i00+c]*(1-fx)*(1-fy)+srcData[i10+c]*fx*(1-fy)+srcData[i01+c]*(1-fx)*fy+srcData[i11+c]*fx*fy);
+      out[oi+3]=255;
+    }
+    return {data:out,width:outW,height:outH};
+  },
+
+  _solveH(A) {
+    const n=8, M=A.map(r=>[...r]);
+    for(let col=0;col<n;col++){
+      let p=-1,best=0;
+      for(let row=col;row<n*2;row++) if(Math.abs(M[row][col])>best){best=Math.abs(M[row][col]);p=row;}
+      if(p<0||best<1e-10) return null;
+      [M[col],M[p]]=[M[p],M[col]];
+      const d=M[col][col]; M[col]=M[col].map(v=>v/d);
+      for(let row=0;row<n*2;row++){if(row===col) continue; const f=M[row][col]; M[row]=M[row].map((v,j)=>v-f*M[col][j]);}
+    }
+    return M.slice(0,8).map(r=>r[8]).concat([1]);
+  },
+
+  // Step 5a — Adaptive threshold (B&W scan look, handles shadows perfectly)
+  // Uses integral image for O(1) local mean queries — fast even on mobile
+  adaptiveThreshold(imageData) {
+    const {data,width,height} = imageData;
+    const gray = this.toGrayscale(imageData);
+    const out  = new ImageData(width, height);
+    const HALF=10, C=10;
+    const integral = new Float64Array((width+1)*(height+1));
+    for(let y=0;y<height;y++) for(let x=0;x<width;x++)
+      integral[(y+1)*(width+1)+(x+1)] = gray[y*width+x]+integral[y*(width+1)+(x+1)]+integral[(y+1)*(width+1)+x]-integral[y*(width+1)+x];
+    for(let y=0;y<height;y++) for(let x=0;x<width;x++){
+      const x1=Math.max(0,x-HALF),y1=Math.max(0,y-HALF),x2=Math.min(width-1,x+HALF),y2=Math.min(height-1,y+HALF);
+      const area=(x2-x1+1)*(y2-y1+1);
+      const sum=integral[(y2+1)*(width+1)+(x2+1)]-integral[y1*(width+1)+(x2+1)]-integral[(y2+1)*(width+1)+x1]+integral[y1*(width+1)+x1];
+      const val=gray[y*width+x]<(sum/area)-C?0:255;
+      const i=(y*width+x)*4; out.data[i]=out.data[i+1]=out.data[i+2]=val; out.data[i+3]=255;
+    }
+    return out;
+  },
+
+  // Step 5b — Colour enhance: tile-based CLAHE in luminance only
+  colorEnhance(imageData) {
+    const {data,width,height} = imageData;
+    const out = new ImageData(new Uint8ClampedArray(data), width, height);
+    const TILE=64;
+    for(let ty=0;ty<height;ty+=TILE) for(let tx=0;tx<width;tx+=TILE){
+      const tw=Math.min(TILE,width-tx), th=Math.min(TILE,height-ty);
+      let lo=255,hi=0;
+      for(let y=ty;y<ty+th;y++) for(let x=tx;x<tx+tw;x++){
+        const i=(y*width+x)*4, lum=0.299*data[i]+0.587*data[i+1]+0.114*data[i+2];
+        if(lum<lo)lo=lum;if(lum>hi)hi=lum;
+      }
+      if(hi-lo<5) continue;
+      const sc=255/(hi-lo);
+      for(let y=ty;y<ty+th;y++) for(let x=tx;x<tx+tw;x++){
+        const i=(y*width+x)*4;
+        out.data[i]  =Math.min(255,Math.round((data[i]  -lo)*sc));
+        out.data[i+1]=Math.min(255,Math.round((data[i+1]-lo)*sc));
+        out.data[i+2]=Math.min(255,Math.round((data[i+2]-lo)*sc));
+      }
+    }
+    return out;
+  },
+
+  // Master pipeline — returns { dataURL, contourFound }
+  async process(dataURL, mode="adaptive", onProgress=()=>{}) {
+    return new Promise(resolve => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX=1400;
+        let w=img.width, h=img.height;
+        if(Math.max(w,h)>MAX){const s=MAX/Math.max(w,h);w=Math.round(w*s);h=Math.round(h*s);}
+        const c=document.createElement("canvas"); c.width=w; c.height=h;
+        const ctx=c.getContext("2d"); ctx.drawImage(img,0,0,w,h);
+        const imgData=ctx.getImageData(0,0,w,h);
+        onProgress(15,"Grayscale + blur…");
+        const gray=this.toGrayscale(imgData), blurred=this.gaussianBlur(gray,w,h);
+        onProgress(35,"Edge detection…");
+        const edges=this.detectEdges(blurred,w,h), corners=this.findDocumentCorners(edges,w,h);
+        onProgress(55,"Perspective correction…");
+        let warpedData=null, contourFound=false;
+        if(corners){warpedData=this.perspectiveWarp(imgData.data,w,h,corners);if(warpedData)contourFound=true;}
+        onProgress(75,"Enhancing…");
+        let finalData;
+        if(warpedData){
+          const wi=new ImageData(warpedData.data,warpedData.width,warpedData.height);
+          finalData=mode==="color"?this.colorEnhance(wi):this.adaptiveThreshold(wi);
+        } else {
+          finalData=mode==="color"?this.colorEnhance(imgData):this.adaptiveThreshold(imgData);
+        }
+        onProgress(95,"Finishing…");
+        const oc=document.createElement("canvas"); oc.width=finalData.width; oc.height=finalData.height;
+        oc.getContext("2d").putImageData(finalData,0,0);
+        resolve({dataURL:oc.toDataURL("image/jpeg",0.92), contourFound});
+      };
+      img.onerror=()=>resolve(null);
+      img.src=dataURL;
+    });
+  }
+};
+
+// ─── SCANNER MODAL (DocScan-powered) ─────────────────────────────────────────
 function ScannerModal({ open, onClose, onUse }) {
-  const [preview, setPreview] = useState(null);
-  const [busy,    setBusy]    = useState(false);
+  const [stage,     setStage]     = useState("idle"); // idle|preview|processing|done
+  const [original,  setOriginal]  = useState(null);
+  const [result,    setResult]    = useState(null);
+  const [progress,  setProgress]  = useState(0);
+  const [progLabel, setProgLabel] = useState("");
+  const [scanMode,  setScanMode]  = useState("adaptive");
+  const [found,     setFound]     = useState(false);
   const fileRef   = useRef(null);
   const scrollRef = useRef(0);
 
-  // iOS-compatible scroll lock
   useEffect(() => {
     if (open) {
-      setPreview(null);
+      setStage("idle"); setOriginal(null); setResult(null); setProgress(0);
       scrollRef.current = window.scrollY;
       document.documentElement.style.setProperty("--bd-scroll-y", `-${scrollRef.current}px`);
       document.body.classList.add("bd-locked");
@@ -553,25 +750,37 @@ function ScannerModal({ open, onClose, onUse }) {
 
   function handleFile(e) {
     const f = e.target.files?.[0]; if (!f) return;
-    setBusy(true);
+    setStage("preview"); setResult(null);
     const r = new FileReader();
-    r.onload = ev => { setPreview(ev.target.result); setBusy(false); };
+    r.onload = ev => setOriginal(ev.target.result);
     r.readAsDataURL(f);
     e.target.value = "";
   }
 
-  function handleUse() { if (preview) { onUse(preview); onClose(); } }
+  async function handleScan() {
+    if (!original) return;
+    setStage("processing"); setProgress(5); setProgLabel("Starting…");
+    const res = await DocScan.process(original, scanMode, (pct, lbl) => {
+      setProgress(pct); setProgLabel(lbl);
+    });
+    if (res) { setResult(res.dataURL); setFound(res.contourFound); setStage("done"); }
+    else     { setStage("preview"); }
+  }
+
+  function handleUse()    { if (result) { onUse(result); onClose(); } }
+  function handleRetake() { setStage("idle"); setOriginal(null); setResult(null); }
+
+  const displaySrc = stage === "done" ? result : original;
 
   return (
     <div className="bd-scanner" data-open={open ? "true" : "false"}>
+
       {/* Header */}
       <div style={{
         display:"flex", alignItems:"center", justifyContent:"space-between",
-        // Safe-area top padding for iPhone notch/dynamic island
         paddingTop:"max(14px, env(safe-area-inset-top, 14px))",
         paddingBottom:12, paddingLeft:14, paddingRight:14,
-        background:T.card, borderBottom:`1px solid ${T.border}`,
-        flexShrink:0,
+        background:T.card, borderBottom:`1px solid ${T.border}`, flexShrink:0,
       }}>
         <button onClick={onClose} style={{
           width:44, height:44, borderRadius:10, background:T.surface,
@@ -579,91 +788,147 @@ function ScannerModal({ open, onClose, onUse }) {
           fontSize:18, display:"flex", alignItems:"center", justifyContent:"center",
           WebkitTapHighlightColor:"transparent", flexShrink:0,
         }}>✕</button>
-        <div style={{ color:T.gold, fontSize:14, fontWeight:700, letterSpacing:"0.12em" }}>
-          📷 SCAN DOCUMENT
+        <div style={{ textAlign:"center" }}>
+          <div style={{ color:T.gold, fontSize:13, fontWeight:700, letterSpacing:"0.12em" }}>
+            {stage==="done" ? "✅ SCAN COMPLETE" : "📷 SCAN DOCUMENT"}
+          </div>
+          {stage==="done" && (
+            <div style={{ color:found?T.success:T.warn, fontSize:10, marginTop:2 }}>
+              {found ? "Document detected & corrected" : "No border found · full frame used"}
+            </div>
+          )}
         </div>
         <div style={{ width:44, flexShrink:0 }}/>
       </div>
 
-      {/* Preview */}
+      {/* Preview area */}
       <div style={{
         flex:1, display:"flex", flexDirection:"column",
         alignItems:"center", justifyContent:"center",
-        background:"#060606", padding:14, overflow:"hidden", minHeight:0,
+        background:"#060606", padding:12, overflow:"hidden", minHeight:0, position:"relative",
       }}>
-        {busy && (
-          <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:12 }}>
-            <Spinner size={34}/>
-            <div style={{ color:T.muted, fontSize:12 }}>LOADING...</div>
-          </div>
-        )}
-
-        {!busy && !preview && (
+        {stage === "idle" && (
           <div onClick={()=>fileRef.current?.click()}
             style={{ textAlign:"center", color:T.muted, cursor:"pointer", padding:16 }}>
             <div style={{ fontSize:52, lineHeight:1, marginBottom:14 }}>📄</div>
-            <div style={{ fontSize:14, marginBottom:4 }}>
-              Tap to photograph or choose a document
-            </div>
-            <div style={{ color:T.muted, fontSize:12, marginBottom:18 }}>
-              Camera or photo library
-            </div>
+            <div style={{ fontSize:14, marginBottom:6 }}>Tap to photograph a document</div>
+            <div style={{ fontSize:12, marginBottom:20, opacity:0.7 }}>Field ticket, load ticket, or any doc</div>
             <div style={{
-              display:"inline-flex", alignItems:"center", gap:8,
-              padding:"12px 20px",
-              background:`rgba(212,175,55,0.12)`,
-              border:`1px solid ${T.goldDim}`, borderRadius:10,
-              color:T.gold, fontWeight:700, fontSize:13, letterSpacing:"0.08em"
-            }}>
-              📁 Choose / Take Photo
-            </div>
+              display:"inline-flex", alignItems:"center", gap:8, padding:"12px 22px",
+              background:`rgba(212,175,55,0.12)`, border:`1px solid ${T.goldDim}`,
+              borderRadius:10, color:T.gold, fontWeight:700, fontSize:13, letterSpacing:"0.08em"
+            }}>📁 Choose / Take Photo</div>
           </div>
         )}
 
-        {!busy && preview && (
-          <img src={preview} alt="Scan preview" style={{
-            maxWidth:"100%", maxHeight:"100%",
-            objectFit:"contain", borderRadius:6,
-            boxShadow:"0 0 0 1px rgba(212,175,55,0.25)"
+        {(stage==="preview"||stage==="done") && displaySrc && (
+          <img src={displaySrc} alt="Preview" style={{
+            maxWidth:"100%", maxHeight:"100%", objectFit:"contain",
+            borderRadius:6, boxShadow:"0 0 0 1px rgba(212,175,55,0.2)"
           }}/>
+        )}
+
+        {stage === "processing" && (
+          <div style={{
+            position:"absolute", inset:0, background:"rgba(0,0,0,0.85)",
+            display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:16,
+          }}>
+            {original && <img src={original} alt="" style={{
+              position:"absolute", inset:0, width:"100%", height:"100%",
+              objectFit:"contain", opacity:0.12, filter:"blur(3px)"
+            }}/>}
+            <div style={{ position:"relative" }}><Spinner size={40} color={T.gold}/></div>
+            <div style={{ position:"relative", textAlign:"center" }}>
+              <div style={{ color:T.gold, fontWeight:700, fontSize:14,
+                letterSpacing:"0.1em", marginBottom:8 }}>PROCESSING</div>
+              <div style={{ color:T.muted, fontSize:12, marginBottom:14 }}>{progLabel}</div>
+              <div style={{ width:180, height:3, background:"rgba(255,255,255,0.1)", borderRadius:99 }}>
+                <div style={{ height:"100%", background:T.gold, borderRadius:99,
+                  width:`${progress}%`, transition:"width 0.2s ease" }}/>
+              </div>
+              <div style={{ color:T.muted, fontSize:11, marginTop:6 }}>{progress}%</div>
+            </div>
+          </div>
         )}
       </div>
 
-      {/* Controls */}
+      {/* Bottom controls */}
       <div style={{
         flexShrink:0, background:T.card, borderTop:`1px solid ${T.border}`,
         paddingTop:12, paddingLeft:14, paddingRight:14,
         paddingBottom:"max(16px, env(safe-area-inset-bottom, 16px))",
       }}>
-        <div style={{ display:"flex", gap:9, marginBottom:8 }}>
-          <button onClick={()=>fileRef.current?.click()} style={{
+        {/* Mode selector — only shown when photo is loaded but not yet scanned */}
+        {stage === "preview" && (
+          <div style={{ marginBottom:10 }}>
+            <div style={{ color:T.muted, fontSize:10, fontWeight:700,
+              letterSpacing:"0.12em", marginBottom:7 }}>SCAN MODE</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:7 }}>
+              {[
+                { id:"adaptive", icon:"🔳", label:"B&W SCAN",  sub:"Best for most docs" },
+                { id:"color",    icon:"🌈", label:"COLOUR",    sub:"Keep colours" },
+              ].map(m => (
+                <button key={m.id} onClick={()=>setScanMode(m.id)} style={{
+                  padding:"9px 10px", borderRadius:8, cursor:"pointer", textAlign:"left",
+                  border:`1px solid ${scanMode===m.id?T.gold:T.border}`,
+                  background: scanMode===m.id?"rgba(212,175,55,0.1)":"transparent",
+                  WebkitTapHighlightColor:"transparent",
+                }}>
+                  <div style={{ fontSize:16, marginBottom:3 }}>{m.icon}</div>
+                  <div style={{ color:scanMode===m.id?T.gold:T.text,
+                    fontSize:11, fontWeight:700, letterSpacing:"0.06em" }}>{m.label}</div>
+                  <div style={{ color:T.muted, fontSize:10, marginTop:1 }}>{m.sub}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div style={{ display:"flex", gap:8, marginBottom:8 }}>
+          {/* Left: retake or choose */}
+          <button onClick={stage==="done"?handleRetake:()=>fileRef.current?.click()} style={{
             flex:1, height:50, background:T.surface, color:T.text,
             border:`1px solid ${T.border}`, borderRadius:10,
             fontWeight:600, fontSize:13, cursor:"pointer",
             display:"flex", alignItems:"center", justifyContent:"center", gap:6,
             WebkitTapHighlightColor:"transparent",
           }}>
-            📁 Choose / Take Photo
+            {stage==="done" ? "🔄 Retake" : "📁 Choose Photo"}
           </button>
-          <button onClick={handleUse} disabled={!preview} style={{
-            flex:1, height:50, border:"none", borderRadius:10,
-            fontWeight:800, fontSize:13, letterSpacing:"0.06em",
-            background: preview ? T.gold : T.surface,
-            color: preview ? "#000" : T.muted,
-            cursor: preview ? "pointer" : "not-allowed",
-            WebkitTapHighlightColor:"transparent",
-          }}>
-            ✓ USE THIS SCAN
-          </button>
+
+          {/* Right: scan or use */}
+          {stage === "preview" && (
+            <button onClick={handleScan} style={{
+              flex:1, height:50, background:T.gold, color:"#000",
+              border:"none", borderRadius:10,
+              fontWeight:800, fontSize:13, letterSpacing:"0.06em",
+              cursor:"pointer", WebkitTapHighlightColor:"transparent",
+              display:"flex", alignItems:"center", justifyContent:"center", gap:7,
+            }}>✦ SCAN IT</button>
+          )}
+          {stage === "done" && (
+            <button onClick={handleUse} style={{
+              flex:2, height:50, background:T.gold, color:"#000",
+              border:"none", borderRadius:10,
+              fontWeight:800, fontSize:13, letterSpacing:"0.06em",
+              cursor:"pointer", WebkitTapHighlightColor:"transparent",
+            }}>✓ USE THIS SCAN</button>
+          )}
+          {(stage==="idle"||stage==="processing") && (
+            <button disabled style={{
+              flex:1, height:50, background:T.surface, color:T.muted,
+              border:`1px solid ${T.border}`, borderRadius:10,
+              fontWeight:800, fontSize:13, cursor:"not-allowed",
+            }}>✦ SCAN IT</button>
+          )}
         </div>
+
         <button onClick={onClose} style={{
           width:"100%", height:42, background:"transparent", color:T.muted,
           border:`1px solid ${T.border}`, borderRadius:9,
           fontWeight:600, fontSize:13, cursor:"pointer",
           WebkitTapHighlightColor:"transparent",
-        }}>
-          ✕ CANCEL
-        </button>
+        }}>✕ CANCEL</button>
       </div>
 
       <input ref={fileRef} type="file" accept="image/*" capture="environment"
