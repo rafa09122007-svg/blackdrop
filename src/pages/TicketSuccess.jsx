@@ -1,62 +1,46 @@
 import React from "react";
+import { T, injectGlobalStyles } from "./shared";
+import { GoldBtn } from "./shared";
 
 export default function TicketSuccess({ onBack }) {
+  injectGlobalStyles();
+
   return (
-    <div style={styles.container}>
-      
-      <div style={styles.card}>
-        <div style={styles.checkmark}>✓</div>
-        <h1 style={styles.title}>Ticket Submitted</h1>
-        <p style={styles.subtitle}>Your ticket has been successfully sent.</p>
+    <div style={{
+      position: "fixed", inset: 0, background: T.bg,
+      display: "flex", justifyContent: "center", alignItems: "center", zIndex: 9999,
+    }}>
+      <div className="pop" style={{
+        background: T.card, padding: "48px 36px", borderRadius: 16,
+        textAlign: "center", border: `1px solid ${T.border}`,
+        borderLeft: `3px solid ${T.gold}`, maxWidth: 360, width: "90%",
+        boxShadow: "0 24px 80px rgba(0,0,0,0.65)",
+      }}>
+        {/* Animated checkmark ring */}
+        <div style={{
+          width: 72, height: 72, borderRadius: "50%",
+          background: "rgba(34,197,94,0.1)", border: "2px solid rgba(34,197,94,0.4)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          margin: "0 auto 20px", fontSize: 32, color: T.success,
+        }}>
+          ✓
+        </div>
 
-        <button style={styles.button} onClick={onBack}>
-          Back to Dashboard
-        </button>
+        <div style={{
+          color: T.gold, fontSize: 22, fontWeight: 800,
+          letterSpacing: "0.12em", marginBottom: 10,
+        }}>
+          TICKET SUBMITTED
+        </div>
+
+        <div style={{
+          color: T.muted, fontSize: 14, lineHeight: 1.6, marginBottom: 32,
+        }}>
+          Your field ticket has been received and is now pending review.
+        </div>
+
+        <GoldBtn onClick={onBack}>← BACK TO DASHBOARD</GoldBtn>
       </div>
-
     </div>
   );
 }
-
-const styles = {
-  container: {
-    position: "fixed",
-    inset: 0,
-    background: "linear-gradient(135deg, #0f172a, #1e293b)",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    zIndex: 9999,
-    animation: "fadeIn 0.4s ease-out"
-  },
-  card: {
-    background: "#111827",
-    padding: "50px",
-    borderRadius: "16px",
-    textAlign: "center",
-    boxShadow: "0 0 40px rgba(0,0,0,0.5)",
-    animation: "pop 0.4s ease-out"
-  },
-  checkmark: {
-    fontSize: "60px",
-    color: "#22c55e",
-    marginBottom: "20px"
-  },
-  title: {
-    color: "white",
-    marginBottom: "10px"
-  },
-  subtitle: {
-    color: "#9ca3af",
-    marginBottom: "30px"
-  },
-  button: {
-    padding: "12px 30px",
-    borderRadius: "8px",
-    border: "none",
-    background: "#2563eb",
-    color: "white",
-    fontWeight: "600",
-    cursor: "pointer"
-  }
-};
