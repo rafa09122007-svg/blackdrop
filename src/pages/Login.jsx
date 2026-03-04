@@ -1,207 +1,80 @@
-import React, { useState } from "react";
+import React, { useState, useCallback } from "react";
+import { API_URL, T, injectGlobalStyles } from "./shared";
+import { Logo, Label, Input, GoldBtn, ErrorMsg, PageShell } from "./shared";
 
-// WEB APP URL
-const API_URL = "https://script.google.com/macros/s/AKfycbwDJZilqySP8zZBHetfQyd-xloh3dz_eKbpwwkLiKohqeQDIRPM8L_H6AjtTU7CSYaT/exec";
 export default function Login({ onLogin }) {
+  injectGlobalStyles();
 
-  const [phone, setPhone] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  const [phone,   setPhone]   = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState("");
 
-  function handlePhoneChange(e) {
-    const numbersOnly = e.target.value.replace(/\D/g, "");
-    setPhone(numbersOnly);
-  }
+  const handleChange = useCallback(e => {
+    setPhone(e.target.value.replace(/\D/g, ""));
+    setError("");
+  }, []);
 
-async function handleLogin() {
-
-  if (!phone || phone.length < 7) {
-    alert("Enter valid phone number");
-    return;
-  }
-
-  if (isLoading) return;
-
-  setIsLoading(true);
-
-  try {
-
-    const response = await fetch(API_URL + "?t=" + Date.now());
-
-    if (!response.ok) {
-      alert("Server error");
-      setIsLoading(false);
+  const handleLogin = useCallback(async () => {
+    if (loading) return;
+    if (!phone || phone.length < 7) {
+      setError("Enter a valid phone number.");
       return;
     }
-
-    const allowedPhones = await response.json();
-
-    const phoneString = String(phone).trim();
-    const match = allowedPhones.some(p => String(p).trim() === phoneString);
-
-    if (match) {
-
-      onLogin(phoneString);
-
-    } else {
-
-      alert("This phone number is not authorized.");
-      setIsLoading(false);
-
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_URL}?t=${Date.now()}`);
+      if (!res.ok) throw new Error("server");
+      const list = await res.json();
+      const ok = list.some(p => String(p).trim() === phone.trim());
+      if (ok) {
+        onLogin(phone.trim());
+      } else {
+        setError("This number is not authorized.");
+        setLoading(false);
+      }
+    } catch {
+      setError("Connection failed — check your signal and try again.");
+      setLoading(false);
     }
-
-  } catch (err) {
-
-    console.error(err);
-    alert("Connection failed.");
-    setIsLoading(false);
-
-  }
-}
+  }, [phone, loading, onLogin]);
 
   return (
-    <div style={styles.container}>
-      <div style={styles.card}>
+    <div style={{
+      background: T.bg, minHeight: "100vh", display: "flex",
+      justifyContent: "center", alignItems: "center", padding: 16,
+    }}>
+      <div className="pop" style={{
+        width: "100%", maxWidth: 360, background: T.card,
+        borderRadius: 16, border: `1px solid ${T.border}`,
+        borderLeft: `3px solid ${T.gold}`, padding: "32px 24px",
+        boxShadow: "0 24px 80px rgba(0,0,0,0.65)",
+      }}>
+        <Logo />
 
-        <div style={styles.header}>
-          BLACK DROP
-        </div>
-
-        <div style={styles.subheader}>
-          FIELD COMMAND
-        </div>
-
-        <div style={styles.label}>
-          PHONE NUMBER
-        </div>
-
-        <input
+        <Label text="Phone Number" required />
+        <Input
           type="tel"
           inputMode="numeric"
           autoComplete="tel"
-          style={styles.input}
-          placeholder="Enter phone number"
+          placeholder="e.g. 4325551234"
           value={phone}
-          onChange={handlePhoneChange}
           maxLength={15}
+          onChange={handleChange}
+          onKeyDown={e => e.key === "Enter" && handleLogin()}
+          aria-label="Phone number"
         />
 
-        <button
-  style={{
-    ...styles.button,
-    opacity: isLoading ? 0.8 : 1,
-    cursor: isLoading ? "not-allowed" : "pointer",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8
-  }}
-  onClick={handleLogin}
-  disabled={isLoading}
->
-  {isLoading && <div style={styles.spinner}></div>}
-  {isLoading ? "LOGGING IN..." : "LOGIN"}
-</button>
+        <ErrorMsg msg={error} />
 
-        <div style={styles.footer}>
-          Secure Access Required
+        <GoldBtn style={{ marginTop: 20 }} loading={loading} onClick={handleLogin}>
+          {loading ? "VERIFYING..." : "ENTER FIELD COMMAND"}
+        </GoldBtn>
+
+        <div style={{ color: T.muted, fontSize: 11, textAlign: "center", marginTop: 16 }}>
+          🔒 Authorized personnel only
         </div>
-
       </div>
     </div>
   );
 }
-
-
-const styles = {
-
-  container: {
-    background: "#0a0a0a",
-    minHeight: "100vh",
-    width: "100%",
-    padding: "16px",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    boxSizing: "border-box",
-  },
-
-  card: {
-    width: "100%",
-    maxWidth: "380px",
-    background: "#141414",
-    padding: "20px",
-    borderRadius: "12px",
-    borderLeft: "4px solid #D4AF37",
-    boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
-    boxSizing: "border-box",
-  },
-
-  header: {
-    color: "#D4AF37",
-    fontSize: "13px",
-    fontWeight: "900",
-    letterSpacing: "3px",
-    textAlign: "center",
-    marginBottom: "4px",
-  },
-
-  subheader: {
-    color: "#D4AF37",
-    fontSize: "20px",
-    fontWeight: "900",
-    letterSpacing: "2px",
-    textAlign: "center",
-    marginBottom: "20px",
-  },
-
-  label: {
-    color: "#888",
-    fontSize: "11px",
-    letterSpacing: "2px",
-    marginBottom: "8px",
-  },
-
-  input: {
-    width: "100%",
-    background: "#1f1f1f",
-    border: "1px solid #333",
-    color: "white",
-    padding: "12px",
-    borderRadius: "8px",
-    fontSize: "16px",
-    marginBottom: "14px",
-    outline: "none",
-    boxSizing: "border-box",
-  },
-
-  button: {
-    width: "100%",
-    background: "#D4AF37",
-    color: "black",
-    border: "none",
-    padding: "12px",
-    fontWeight: "900",
-    letterSpacing: "2px",
-    borderRadius: "8px",
-    cursor: "pointer",
-    fontSize: "13px",
-    boxSizing: "border-box",
-  },
-
-  footer: {
-    color: "#666",
-    fontSize: "11px",
-    textAlign: "center",
-    marginTop: "14px",
-  },
-
-  spinner: {
-  width: 14,
-  height: 14,
-  border: "2px solid rgba(0,0,0,0.3)",
-  borderTop: "2px solid black",
-  borderRadius: "50%",
-  animation: "spin 0.8s linear infinite"
-},
-
-};
