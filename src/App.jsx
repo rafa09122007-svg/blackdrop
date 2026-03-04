@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useRef } from "react";
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const API_URL =
-  "https://script.google.com/macros/s/AKfycbwZ4HWc7_V8wEIxI_wvTpdTYq9KGoLoYNgE1JZGrijFMGxJydCnbmoIFi-j1bbLB0CKJQ/exec";
+  "https://script.google.com/macros/s/AKfycbwS0QFVxrOt0dPJhAMiPAvIEaX3AekuXCrLtn3jAydu4cqgwGHIeGpvF_kIudbM6-0aGw/exec";
 
 // ─── DESIGN TOKENS ───────────────────────────────────────────────────────────
 const T = {
@@ -495,24 +495,40 @@ function TicketSuccess({ onBack }) {
 }
 
 // ─── SCANNER MODAL ────────────────────────────────────────────────────────────
+// ─── ADVANCED DOCUMENT SCANNER ───────────────────────────────────────────────
 function ScannerModal({ open, onClose, onUse }) {
-  const videoRef    = useRef(null);
-  const canvasRef   = useRef(null);
-  const streamRef   = useRef(null);
-  const fileInputRef= useRef(null);
-  const [captured,  setCaptured] = useState(null);
-  const [ready,     setReady]    = useState(false);
-  const [camError,  setCamError] = useState(false);
+  // stage: "capture" | "adjust" | "enhance"
+  const [stage,      setStage]      = useState("capture");
+  const [rawImage,   setRawImage]   = useState(null);
+  const [corners,    setCorners]    = useState(null);
+  const [dragIdx,    setDragIdx]    = useState(null);
+  const [filter,     setFilter]     = useState("enhanced");
+  const [processing, setProcessing] = useState(false);
+  const [finalImage, setFinalImage] = useState(null);
+  const [ready,      setReady]      = useState(false);
+  const [camError,   setCamError]   = useState(false);
+  const [imgSize,    setImgSize]    = useState({ w:0, h:0 });
 
+  const videoRef    = useRef(null);
+  const streamRef   = useRef(null);
+  const captureRef  = useRef(null);
+  const adjustRef   = useRef(null);
+  const outputRef   = useRef(null);
+  const fileInputRef= useRef(null);
+  const imgRef      = useRef(null);
+  const dragRef     = useRef(null);
+
+  // ── camera lifecycle
   useEffect(() => {
     if (!open) return;
+    setStage("capture"); setRawImage(null); setCorners(null);
+    setFilter("enhanced"); setFinalImage(null); setProcessing(false);
+    setReady(false); setCamError(false);
     let active = true;
-    setCaptured(null); setReady(false); setCamError(false);
-
     (async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video:{ facingMode:{ ideal:"environment" }, width:{ ideal:1920 }, height:{ ideal:1080 } }
+          video: { facingMode: { ideal:"environment" }, width:{ ideal:2560 }, height:{ ideal:1920 } }
         });
         if (!active) return;
         streamRef.current = stream;
@@ -520,120 +536,671 @@ function ScannerModal({ open, onClose, onUse }) {
         setReady(true);
       } catch { setCamError(true); }
     })();
-
     return () => {
       active = false;
-      if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-      setReady(false);
+      if (streamRef.current) { streamRef.current.getTracks().forEach(t=>t.stop()); streamRef.current=null; }
     };
   }, [open]);
 
-  function capture() {
-    const v = videoRef.current; if (!v) return;
-    const c = canvasRef.current;
-    const cropX = v.videoWidth  * 0.05, cropY = v.videoHeight * 0.10;
-    const cropW = v.videoWidth  * 0.90, cropH = v.videoHeight * 0.80;
-    c.width = cropW; c.height = cropH;
-    c.getContext("2d").drawImage(v, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-    setCaptured(c.toDataURL("image/png"));
+  // ── capture from live camera
+  function capturePhoto() {
+    const v = videoRef.current; if (!v || !captureRef.current) return;
+    const c = captureRef.current;
+    c.width = v.videoWidth; c.height = v.videoHeight;
+    c.getContext("2d").drawImage(v, 0, 0);
+    loadRawImage(c.toDataURL("image/jpeg", 0.96));
   }
 
+  // ── upload file handler
   function handleFile(e) {
     const f = e.target.files[0]; if (!f) return;
     const r = new FileReader();
-    r.onload = ev => {
-      const img = new Image();
-      img.onload = () => {
-        const c = canvasRef.current;
-        c.width = img.width; c.height = img.height;
-        c.getContext("2d").drawImage(img, 0, 0);
-        setCaptured(c.toDataURL("image/jpeg", 0.92));
-      };
-      img.src = ev.target.result;
-    };
+    r.onload = ev => loadRawImage(ev.target.result);
     r.readAsDataURL(f);
+    e.target.value = "";
+  }
+
+  // ── load raw image → run edge detection → go to adjust stage
+  function loadRawImage(dataUrl) {
+    setProcessing(true);
+    const img = new Image();
+    img.onload = () => {
+      imgRef.current = img;
+      setRawImage(dataUrl);
+      setImgSize({ w: img.width, h: img.height });
+      const detected = detectCorners(img);
+      setCorners(detected);
+      if (streamRef.current) { streamRef.current.getTracks().forEach(t=>t.stop()); streamRef.current=null; }
+      setProcessing(false);
+      setStage("adjust");
+    };
+    img.src = dataUrl;
+  }
+
+  // ── EDGE DETECTION: Sobel gradient on downsampled image
+  function detectCorners(img) {
+    const MAX = 600;
+    const scale = Math.min(1, MAX / Math.max(img.width, img.height));
+    const W = Math.round(img.width * scale), H = Math.round(img.height * scale);
+    const c = document.createElement("canvas");
+    c.width = W; c.height = H;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(img, 0, 0, W, H);
+
+    try {
+      const px = ctx.getImageData(0, 0, W, H).data;
+      const gray = new Float32Array(W * H);
+      for (let i = 0; i < W * H; i++)
+        gray[i] = 0.299*px[i*4] + 0.587*px[i*4+1] + 0.114*px[i*4+2];
+
+      // Sobel edge magnitude
+      const edge = new Float32Array(W * H);
+      let maxE = 0;
+      for (let y = 1; y < H-1; y++) {
+        for (let x = 1; x < W-1; x++) {
+          const gx = -gray[(y-1)*W+(x-1)] - 2*gray[y*W+(x-1)] - gray[(y+1)*W+(x-1)]
+                   +  gray[(y-1)*W+(x+1)] + 2*gray[y*W+(x+1)] + gray[(y+1)*W+(x+1)];
+          const gy = -gray[(y-1)*W+(x-1)] - 2*gray[(y-1)*W+x] - gray[(y-1)*W+(x+1)]
+                   +  gray[(y+1)*W+(x-1)] + 2*gray[(y+1)*W+x] + gray[(y+1)*W+(x+1)];
+          const e = Math.sqrt(gx*gx + gy*gy);
+          edge[y*W+x] = e;
+          if (e > maxE) maxE = e;
+        }
+      }
+
+      const thresh = maxE * 0.22;
+      let minX=W, maxX=0, minY=H, maxY=0, found=false;
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          if (edge[y*W+x] > thresh) {
+            if (x < minX) minX=x; if (x > maxX) maxX=x;
+            if (y < minY) minY=y; if (y > maxY) maxY=y;
+            found = true;
+          }
+        }
+      }
+
+      if (found && (maxX-minX)/W > 0.35 && (maxY-minY)/H > 0.35) {
+        const pad = 4;
+        const nx = v => Math.max(0.01, Math.min(0.99, (v+pad)/W));
+        const ny = v => Math.max(0.01, Math.min(0.99, (v+pad)/H));
+        const fx = v => Math.max(0.01, Math.min(0.99, (v-pad)/W));
+        const fy = v => Math.max(0.01, Math.min(0.99, (v-pad)/H));
+        return [
+          { x: nx(minX), y: ny(minY) },
+          { x: fx(maxX), y: ny(minY) },
+          { x: fx(maxX), y: fy(maxY) },
+          { x: nx(minX), y: fy(maxY) },
+        ];
+      }
+    } catch(_) {}
+
+    // Fallback padded rect
+    const p = 0.07;
+    return [{ x:p,y:p },{ x:1-p,y:p },{ x:1-p,y:1-p },{ x:p,y:1-p }];
+  }
+
+  // ── draw corner adjustment overlay
+  useEffect(() => {
+    if (stage !== "adjust" || !corners || !adjustRef.current || !imgRef.current) return;
+    requestAnimationFrame(drawAdjust);
+  }, [stage, corners]);
+
+  function drawAdjust() {
+    const canvas = adjustRef.current, img = imgRef.current;
+    if (!canvas || !img) return;
+    const maxW = Math.min(window.innerWidth - 32, 500);
+    const scale = Math.min(maxW / img.width, (window.innerHeight * 0.62) / img.height);
+    canvas.width  = Math.round(img.width  * scale);
+    canvas.height = Math.round(img.height * scale);
+    const ctx = canvas.getContext("2d");
+
+    // Draw image
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    // Dim everything outside selection
+    const pts = corners.map(c => ({ x: c.x*canvas.width, y: c.y*canvas.height }));
+    ctx.fillStyle = "rgba(0,0,0,0.52)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Clear inside selection (show image clearly)
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    pts.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.closePath();
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.fill();
+    ctx.restore();
+
+    // Redraw image inside selection
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    pts.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    ctx.restore();
+
+    // Animated gold border
+    ctx.strokeStyle = "#D4AF37";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([10, 4]);
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    pts.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Edge lines solid
+    ctx.strokeStyle = "rgba(212,175,55,0.5)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    pts.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.closePath();
+    ctx.stroke();
+
+    // Corner handles
+    const LABELS = ["TL","TR","BR","BL"];
+    pts.forEach((p, i) => {
+      // Shadow
+      ctx.shadowBlur = 8; ctx.shadowColor = "rgba(0,0,0,0.8)";
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 18, 0, Math.PI*2);
+      ctx.fillStyle = dragRef.current === i ? "#fff" : "#D4AF37";
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // Label
+      ctx.fillStyle = "#000";
+      ctx.font = "bold 9px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(LABELS[i], p.x, p.y);
+    });
+  }
+
+  // ── pointer events for corner dragging
+  function getCanvasXY(e) {
+    const canvas = adjustRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width  / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const src = e.touches ? e.touches[0] : e;
+    return {
+      x: (src.clientX - rect.left) * scaleX,
+      y: (src.clientY - rect.top)  * scaleY,
+    };
+  }
+
+  function onPtrDown(e) {
+    e.preventDefault();
+    const { x, y } = getCanvasXY(e);
+    const canvas = adjustRef.current;
+    const pts = corners.map(c => ({ x: c.x*canvas.width, y: c.y*canvas.height }));
+    const hit = pts.findIndex(p => Math.hypot(p.x-x, p.y-y) < 28);
+    if (hit !== -1) { dragRef.current = hit; setDragIdx(hit); }
+  }
+
+  function onPtrMove(e) {
+    if (dragRef.current === null) return;
+    e.preventDefault();
+    const { x, y } = getCanvasXY(e);
+    const canvas = adjustRef.current;
+    const newC = corners.map((c, i) => i === dragRef.current
+      ? { x: Math.max(0,Math.min(1, x/canvas.width)), y: Math.max(0,Math.min(1, y/canvas.height)) }
+      : c
+    );
+    setCorners(newC);
+    // Draw immediately without waiting for React re-render
+    const img = imgRef.current;
+    if (!canvas || !img) return;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const pts2 = newC.map(c => ({ x: c.x*canvas.width, y: c.y*canvas.height }));
+    ctx.fillStyle = "rgba(0,0,0,0.52)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(pts2[0].x,pts2[0].y); pts2.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.closePath();
+    ctx.globalCompositeOperation="destination-out"; ctx.fill(); ctx.restore();
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(pts2[0].x,pts2[0].y); pts2.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.closePath();
+    ctx.clip(); ctx.drawImage(img,0,0,canvas.width,canvas.height); ctx.restore();
+    ctx.strokeStyle="#D4AF37"; ctx.lineWidth=2; ctx.setLineDash([10,4]);
+    ctx.beginPath(); ctx.moveTo(pts2[0].x,pts2[0].y); pts2.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+    const LB=["TL","TR","BR","BL"];
+    pts2.forEach((p,i)=>{
+      ctx.beginPath(); ctx.arc(p.x,p.y,18,0,Math.PI*2);
+      ctx.fillStyle=dragRef.current===i?"#fff":"#D4AF37"; ctx.fill();
+      ctx.strokeStyle="#000"; ctx.lineWidth=2; ctx.stroke();
+      ctx.fillStyle="#000"; ctx.font="bold 9px sans-serif"; ctx.textAlign="center"; ctx.textBaseline="middle";
+      ctx.fillText(LB[i],p.x,p.y);
+    });
+  }
+
+  function onPtrUp() { dragRef.current = null; setDragIdx(null); }
+
+  // ── PERSPECTIVE WARP using bilinear sampling
+  function warpAndProcess(selectedFilter) {
+    setProcessing(true);
+    setTimeout(() => {
+      try {
+        const img = imgRef.current;
+        const W = img.width, H = img.height;
+        const pts = corners.map(c => ({ x: c.x*W, y: c.y*H }));
+
+        // Compute output dimensions from corner distances
+        const wT = Math.hypot(pts[1].x-pts[0].x, pts[1].y-pts[0].y);
+        const wB = Math.hypot(pts[2].x-pts[3].x, pts[2].y-pts[3].y);
+        const hL = Math.hypot(pts[3].x-pts[0].x, pts[3].y-pts[0].y);
+        const hR = Math.hypot(pts[2].x-pts[1].x, pts[2].y-pts[1].y);
+        const outW = Math.round(Math.max(wT, wB));
+        const outH = Math.round(Math.max(hL, hR));
+
+        // Get source pixels
+        const srcC = document.createElement("canvas");
+        srcC.width = W; srcC.height = H;
+        const srcCtx = srcC.getContext("2d");
+        srcCtx.drawImage(img, 0, 0);
+        const srcPx = srcCtx.getImageData(0, 0, W, H).data;
+
+        // Destination canvas
+        const dstC = outputRef.current;
+        dstC.width = outW; dstC.height = outH;
+        const dstCtx = dstC.getContext("2d");
+        const dstData = dstCtx.createImageData(outW, outH);
+        const dstPx = dstData.data;
+
+        // Bilinear interpolation perspective warp
+        for (let dy = 0; dy < outH; dy++) {
+          const v = dy / outH;
+          for (let dx = 0; dx < outW; dx++) {
+            const u = dx / outW;
+            // Bilerp corner positions
+            const sx = (1-u)*(1-v)*pts[0].x + u*(1-v)*pts[1].x + u*v*pts[2].x + (1-u)*v*pts[3].x;
+            const sy = (1-u)*(1-v)*pts[0].y + u*(1-v)*pts[1].y + u*v*pts[2].y + (1-u)*v*pts[3].y;
+
+            // Bilinear pixel sample from source
+            const x0 = Math.floor(sx), y0 = Math.floor(sy);
+            const x1 = Math.min(x0+1, W-1), y1 = Math.min(y0+1, H-1);
+            const fx = sx-x0, fy = sy-y0;
+            const di = (dy*outW+dx)*4;
+
+            for (let ch = 0; ch < 3; ch++) {
+              const tl = srcPx[(y0*W+x0)*4+ch];
+              const tr = srcPx[(y0*W+x1)*4+ch];
+              const bl = srcPx[(y1*W+x0)*4+ch];
+              const br = srcPx[(y1*W+x1)*4+ch];
+              dstPx[di+ch] = Math.round(tl*(1-fx)*(1-fy) + tr*fx*(1-fy) + bl*(1-fx)*fy + br*fx*fy);
+            }
+            dstPx[di+3] = 255;
+          }
+        }
+        dstCtx.putImageData(dstData, 0, 0);
+
+        // Apply filter + sharpening
+        applyFilter(dstCtx, outW, outH, selectedFilter);
+
+        setFinalImage(dstC.toDataURL("image/jpeg", 0.93));
+        setFilter(selectedFilter);
+        setProcessing(false);
+        setStage("enhance");
+      } catch(err) {
+        console.error("Warp error:", err);
+        setProcessing(false);
+      }
+    }, 30);
+  }
+
+  function applyFilter(ctx, W, H, f) {
+    const id = ctx.getImageData(0, 0, W, H);
+    const d  = id.data;
+
+    if (f === "bw") {
+      for (let i = 0; i < d.length; i+=4) {
+        const g = Math.round(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2]);
+        d[i]=d[i+1]=d[i+2]=g;
+      }
+    } else if (f === "enhanced") {
+      for (let i = 0; i < d.length; i+=4) {
+        d[i]   = Math.min(255, Math.max(0, (d[i]  -128)*1.3+148));
+        d[i+1] = Math.min(255, Math.max(0, (d[i+1]-128)*1.25+138));
+        d[i+2] = Math.min(255, Math.max(0, (d[i+2]-128)*1.15+128));
+      }
+    } else if (f === "highcontrast") {
+      for (let i = 0; i < d.length; i+=4) {
+        const g = 0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+        const v = g > 128 ? Math.min(255, g*1.5) : Math.max(0, g*0.4);
+        d[i]=d[i+1]=d[i+2]=v;
+      }
+    }
+
+    if (f !== "original") {
+      // Unsharp mask: sharpen
+      const blurred = boxBlur(d, W, H, 1);
+      for (let i = 0; i < d.length; i+=4) {
+        for (let c=0; c<3; c++)
+          d[i+c] = Math.min(255, Math.max(0, d[i+c]*2.4 - blurred[i+c]*1.4));
+      }
+    }
+    ctx.putImageData(id, 0, 0);
+  }
+
+  function boxBlur(data, W, H, r) {
+    const out = new Uint8ClampedArray(data.length);
+    const tmp = new Uint8ClampedArray(data.length);
+    // Horizontal
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++) {
+      let rv=0,gv=0,bv=0,n=0;
+      for (let dx=-r;dx<=r;dx++) {
+        const xi=Math.max(0,Math.min(W-1,x+dx)), i=(y*W+xi)*4;
+        rv+=data[i];gv+=data[i+1];bv+=data[i+2];n++;
+      }
+      const i=(y*W+x)*4; tmp[i]=rv/n;tmp[i+1]=gv/n;tmp[i+2]=bv/n;tmp[i+3]=255;
+    }
+    // Vertical
+    for (let x=0;x<W;x++) for (let y=0;y<H;y++) {
+      let rv=0,gv=0,bv=0,n=0;
+      for (let dy=-r;dy<=r;dy++) {
+        const yi=Math.max(0,Math.min(H-1,y+dy)), i=(yi*W+x)*4;
+        rv+=tmp[i];gv+=tmp[i+1];bv+=tmp[i+2];n++;
+      }
+      const i=(y*W+x)*4; out[i]=rv/n;out[i+1]=gv/n;out[i+2]=bv/n;out[i+3]=255;
+    }
+    return out;
+  }
+
+  // ── change filter on enhance stage
+  function changeFilter(f) {
+    if (processing) return;
+    setProcessing(true);
+    setFilter(f);
+    setTimeout(() => {
+      const canvas = outputRef.current;
+      const ctx    = canvas.getContext("2d");
+      // Re-draw from warped base then apply new filter
+      warpAndProcess(f);
+    }, 20);
   }
 
   if (!open) return null;
 
+  const FILTERS = [
+    { id:"enhanced",     icon:"✨", label:"Enhanced",     desc:"Sharp + clear"  },
+    { id:"bw",           icon:"◑",  label:"Black & White", desc:"Classic scan"   },
+    { id:"highcontrast", icon:"◆",  label:"High Contrast", desc:"Max readability"},
+    { id:"original",     icon:"⬜", label:"Original",      desc:"No processing"  },
+  ];
+
+  const doneW = outputRef.current?.width  || 0;
+  const doneH = outputRef.current?.height || 0;
+  const mpx   = doneW && doneH ? ((doneW*doneH)/1e6).toFixed(1) : null;
+
   return (
     <div style={{
-      position:"fixed", inset:0, background:"rgba(0,0,0,0.92)",
-      display:"flex", justifyContent:"center", alignItems:"center", zIndex:9999, padding: 16
+      position:"fixed", inset:0, background:"#050608",
+      display:"flex", flexDirection:"column", zIndex:9999,
+      fontFamily:"'Rajdhani','Inter',sans-serif"
     }}>
+      {/* ── TOP HEADER */}
       <div style={{
-        position:"relative", width:"100%", maxWidth: 520,
-        background: T.card, borderRadius: 14, padding: 20,
-        border:`1px solid ${T.border}`, textAlign:"center"
+        display:"flex", alignItems:"center", justifyContent:"space-between",
+        padding:"12px 16px", background:T.card,
+        borderBottom:`1px solid ${T.border}`, flexShrink:0
       }}>
+        <div>
+          <div style={{ color:T.gold, fontSize:14, fontWeight:700, letterSpacing:"0.15em" }}>
+            {stage==="capture"?"📷 SCAN DOCUMENT": stage==="adjust"?"✂ ADJUST EDGES":"🎨 ENHANCE & CONFIRM"}
+          </div>
+          <div style={{ color:T.muted, fontSize:10, marginTop:1 }}>
+            {stage==="capture"?"Align document in frame and capture"
+            :stage==="adjust"?"Drag gold corners to fit the document edges"
+            :"Select filter and confirm your scan"}
+          </div>
+        </div>
         <button onClick={onClose} style={{
-          position:"absolute", top: 12, right: 12,
           background:"transparent", border:`1px solid ${T.border}`,
-          color: T.muted, borderRadius: 8, padding:"4px 10px", cursor:"pointer", fontSize: 18
-        }}>✕</button>
+          color:T.muted, borderRadius:8, padding:"6px 12px",
+          cursor:"pointer", fontSize:12, letterSpacing:"0.05em"
+        }}>✕ CANCEL</button>
+      </div>
 
-        <div style={{ color: T.gold, fontFamily:"'Rajdhani',sans-serif",
-          fontSize: 16, fontWeight: 700, letterSpacing:"0.1em", marginBottom: 14 }}>
-          CAPTURE IMAGE
-        </div>
+      {/* ── PROGRESS */}
+      <div style={{ height:3, background:T.surface, flexShrink:0 }}>
+        <div style={{
+          height:"100%", background:`linear-gradient(90deg, ${T.goldDim}, ${T.gold})`,
+          transition:"width 0.5s ease",
+          width:stage==="capture"?"33%":stage==="adjust"?"66%":"100%"
+        }}/>
+      </div>
 
-        {/* Preview area */}
-        <div style={{ position:"relative", borderRadius: 8, overflow:"hidden",
-          background:"#000", marginBottom: 14, minHeight: 200 }}>
-          <video ref={videoRef} playsInline autoPlay
-            style={{ width:"100%", display: captured ? "none" : "block" }}/>
-          {captured && <img src={captured} style={{ width:"100%" }} alt=""/>}
-          {!captured && !camError && (
-            <div style={{
-              position:"absolute", top:"10%", left:"5%", right:"5%", bottom:"10%",
-              border:`2px solid ${T.gold}`, borderRadius: 4, pointerEvents:"none"
-            }}/>
-          )}
-          {camError && !captured && (
-            <div style={{ color: T.muted, padding: 40, fontSize: 13 }}>
-              Camera unavailable. Use upload below.
-            </div>
-          )}
-        </div>
+      {/* ══ STAGE 1: CAPTURE ══ */}
+      {stage==="capture" && (
+        <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+          <div style={{ flex:1, position:"relative", background:"#000", overflow:"hidden" }}>
+            <video ref={videoRef} playsInline autoPlay muted
+              style={{ width:"100%", height:"100%", objectFit:"cover",
+                display:camError?"none":"block" }}/>
 
-        <div style={{ display:"flex", gap: 10 }}>
-          {!captured ? (
-            <>
+            {!camError && (
+              <svg style={{ position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none" }}>
+                <defs>
+                  <mask id="guideM">
+                    <rect width="100%" height="100%" fill="white"/>
+                    <rect x="6%" y="10%" width="88%" height="80%" rx="6" fill="black"/>
+                  </mask>
+                </defs>
+                <rect width="100%" height="100%" fill="rgba(0,0,0,0.45)" mask="url(#guideM)"/>
+                <rect x="6%" y="10%" width="88%" height="80%" rx="6"
+                  fill="none" stroke="#D4AF37" strokeWidth="1.5" strokeDasharray="14 5"/>
+                {[["6%","10%"],["94%","10%"],["94%","90%"],["6%","90%"]].map(([cx,cy],i) => (
+                  <circle key={i} cx={cx} cy={cy} r="5" fill="#D4AF37"/>
+                ))}
+                <text x="50%" y="93%" textAnchor="middle"
+                  style={{ fill:"#D4AF37", fontSize:"11px", letterSpacing:"0.15em", fontFamily:"'Rajdhani',sans-serif" }}>
+                  ALIGN DOCUMENT WITHIN FRAME
+                </text>
+              </svg>
+            )}
+
+            {camError && (
+              <div style={{
+                position:"absolute",inset:0,display:"flex",flexDirection:"column",
+                alignItems:"center",justifyContent:"center",gap:14
+              }}>
+                <div style={{ fontSize:44 }}>📷</div>
+                <div style={{ color:T.muted, fontSize:13 }}>Camera unavailable</div>
+                <button onClick={() => fileInputRef.current.click()} style={{
+                  padding:"11px 28px", background:T.gold, color:"#000",
+                  border:"none", borderRadius:8, fontWeight:800, cursor:"pointer",
+                  fontSize:14, letterSpacing:"0.1em"
+                }}>📁 UPLOAD PHOTO</button>
+              </div>
+            )}
+
+            {processing && (
+              <div style={{
+                position:"absolute",inset:0,background:"rgba(0,0,0,0.7)",
+                display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12
+              }}>
+                <div style={{ width:36,height:36,border:`3px solid rgba(212,175,55,0.2)`,
+                  borderTop:`3px solid ${T.gold}`,borderRadius:"50%",animation:"spin 0.7s linear infinite" }}/>
+                <div style={{ color:T.gold, fontSize:12, letterSpacing:"0.1em" }}>DETECTING EDGES...</div>
+              </div>
+            )}
+          </div>
+
+          <div style={{ padding:"14px 16px", background:T.card, borderTop:`1px solid ${T.border}`, flexShrink:0 }}>
+            <div style={{ display:"flex", gap:10 }}>
               {!camError && (
-                <button onClick={capture} disabled={!ready} style={{
-                  flex:1, padding:"11px 0", background: ready ? T.gold : T.surface,
-                  color: ready ? "#000" : T.muted, border:"none", borderRadius: 8,
-                  fontWeight: 700, fontSize: 13, cursor: ready ? "pointer" : "not-allowed",
-                  fontFamily:"'Rajdhani',sans-serif", letterSpacing:"0.08em"
+                <button onClick={capturePhoto} disabled={!ready||processing} style={{
+                  flex:2, padding:"14px 0", background:ready&&!processing?T.gold:T.surface,
+                  color:ready&&!processing?"#000":T.muted, border:"none", borderRadius:10,
+                  fontWeight:800, fontSize:15, cursor:ready&&!processing?"pointer":"not-allowed",
+                  letterSpacing:"0.1em"
                 }}>📸 CAPTURE</button>
               )}
               <button onClick={() => fileInputRef.current.click()} style={{
-                flex:1, padding:"11px 0", background: T.surface,
-                color: T.text, border:`1px solid ${T.border}`, borderRadius: 8,
-                fontWeight: 600, fontSize: 13, cursor:"pointer"
+                flex:1, padding:"14px 0", background:T.surface,
+                color:T.text, border:`1px solid ${T.border}`, borderRadius:10,
+                fontWeight:600, fontSize:13, cursor:"pointer"
               }}>📁 UPLOAD</button>
-            </>
-          ) : (
-            <>
-              <button onClick={() => setCaptured(null)} style={{
-                flex:1, padding:"11px 0", background: T.surface,
-                color: T.text, border:`1px solid ${T.border}`, borderRadius: 8,
-                fontWeight: 600, fontSize: 13, cursor:"pointer"
-              }}>↩ RETAKE</button>
-              <button onClick={() => onUse(captured)} style={{
-                flex:1, padding:"11px 0", background: T.gold,
-                color:"#000", border:"none", borderRadius: 8,
-                fontWeight: 700, fontSize: 13, cursor:"pointer",
-                fontFamily:"'Rajdhani',sans-serif", letterSpacing:"0.08em"
-              }}>✓ USE PHOTO</button>
-            </>
-          )}
+            </div>
+          </div>
         </div>
+      )}
 
-        <input ref={fileInputRef} type="file" accept="image/*"
-          style={{ display:"none" }} onChange={handleFile}/>
-        <canvas ref={canvasRef} style={{ display:"none" }}/>
-      </div>
+      {/* ══ STAGE 2: ADJUST CORNERS ══ */}
+      {stage==="adjust" && (
+        <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+          <div style={{
+            flex:1, overflow:"auto", display:"flex",
+            alignItems:"center", justifyContent:"center",
+            padding:"10px", background:"#0a0a0c"
+          }}>
+            <canvas ref={adjustRef}
+              style={{ display:"block", maxWidth:"100%", touchAction:"none",
+                cursor:"crosshair", borderRadius:4 }}
+              onMouseDown={onPtrDown} onMouseMove={onPtrMove} onMouseUp={onPtrUp} onMouseLeave={onPtrUp}
+              onTouchStart={onPtrDown} onTouchMove={onPtrMove} onTouchEnd={onPtrUp}
+            />
+          </div>
+
+          <div style={{ padding:"12px 16px", background:T.card, borderTop:`1px solid ${T.border}`, flexShrink:0 }}>
+            <div style={{
+              display:"flex", justifyContent:"center", gap:16, marginBottom:12
+            }}>
+              {["TL","TR","BR","BL"].map((lbl,i) => (
+                <div key={lbl} style={{
+                  width:30,height:30,borderRadius:"50%",background:T.gold,
+                  display:"flex",alignItems:"center",justifyContent:"center",
+                  fontSize:9,fontWeight:800,color:"#000",letterSpacing:"0.05em"
+                }}>{lbl}</div>
+              ))}
+            </div>
+            <div style={{ color:T.muted, fontSize:10, textAlign:"center", marginBottom:12, letterSpacing:"0.08em" }}>
+              DRAG CORNERS TO FIT THE DOCUMENT
+            </div>
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={() => { setStage("capture"); setRawImage(null); }} style={{
+                flex:1, padding:"12px 0", background:"transparent",
+                color:T.text, border:`1px solid ${T.border}`, borderRadius:8,
+                fontWeight:600, fontSize:13, cursor:"pointer"
+              }}>↩ RETAKE</button>
+              <button onClick={() => warpAndProcess("enhanced")} disabled={processing} style={{
+                flex:2, padding:"12px 0",
+                background:processing?T.surface:T.gold,
+                color:processing?T.muted:"#000", border:"none", borderRadius:8,
+                fontWeight:800, fontSize:14, cursor:processing?"not-allowed":"pointer",
+                letterSpacing:"0.08em", display:"flex", alignItems:"center",
+                justifyContent:"center", gap:8
+              }}>
+                {processing
+                  ? <><div style={{ width:14,height:14,border:"2px solid rgba(0,0,0,0.3)",
+                      borderTop:"2px solid #000",borderRadius:"50%",animation:"spin 0.7s linear infinite" }}/> PROCESSING...</>
+                  : "⚡ PROCESS SCAN"
+                }
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ STAGE 3: ENHANCE + CONFIRM ══ */}
+      {stage==="enhance" && (
+        <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+          {/* Filter selector */}
+          <div style={{
+            display:"flex", gap:6, padding:"10px 12px",
+            background:T.card, borderBottom:`1px solid ${T.border}`,
+            flexShrink:0, overflowX:"auto"
+          }}>
+            {FILTERS.map(f => (
+              <button key={f.id} onClick={() => changeFilter(f.id)} style={{
+                flexShrink:0, padding:"8px 12px", borderRadius:8,
+                background:filter===f.id?"rgba(212,175,55,0.12)":"transparent",
+                border:`1px solid ${filter===f.id?T.gold:T.border}`,
+                color:filter===f.id?T.gold:T.muted,
+                cursor:"pointer", transition:"all 0.15s",
+                fontFamily:"'Rajdhani',sans-serif"
+              }}>
+                <div style={{ fontSize:13, fontWeight:filter===f.id?700:400 }}>{f.icon} {f.label}</div>
+                <div style={{ fontSize:9, color:T.muted, marginTop:1 }}>{f.desc}</div>
+              </button>
+            ))}
+          </div>
+
+          {/* Preview */}
+          <div style={{
+            flex:1, overflow:"auto", background:"#0a0a0c",
+            display:"flex", alignItems:"center", justifyContent:"center", padding:12
+          }}>
+            {processing ? (
+              <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:14 }}>
+                <div style={{ width:36,height:36,border:`3px solid rgba(212,175,55,0.2)`,
+                  borderTop:`3px solid ${T.gold}`,borderRadius:"50%",animation:"spin 0.7s linear infinite" }}/>
+                <div style={{ color:T.muted, fontSize:12, letterSpacing:"0.1em" }}>APPLYING FILTER...</div>
+              </div>
+            ) : finalImage && (
+              <img src={finalImage} alt="Scan preview" style={{
+                maxWidth:"100%", maxHeight:"100%",
+                borderRadius:4, boxShadow:"0 12px 48px rgba(0,0,0,0.9)"
+              }}/>
+            )}
+          </div>
+
+          {/* Metadata bar */}
+          {!processing && finalImage && mpx && (
+            <div style={{
+              padding:"6px 14px", background:T.surface,
+              borderTop:`1px solid ${T.border}`, flexShrink:0,
+              display:"flex", justifyContent:"space-between", alignItems:"center"
+            }}>
+              <span style={{ color:T.muted, fontSize:10 }}>
+                📐 {doneW}×{doneH}px &nbsp;·&nbsp; {mpx}MP
+              </span>
+              <span style={{
+                background:"rgba(34,197,94,0.1)", color:"#22c55e",
+                fontSize:10, padding:"2px 10px", borderRadius:99, fontWeight:700
+              }}>✓ SCAN READY</span>
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div style={{ padding:"14px 16px", background:T.card, borderTop:`1px solid ${T.border}`, flexShrink:0 }}>
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={() => { setStage("adjust"); setFinalImage(null); }} style={{
+                flex:1, padding:"12px 0", background:"transparent",
+                color:T.text, border:`1px solid ${T.border}`, borderRadius:8,
+                fontWeight:600, fontSize:13, cursor:"pointer"
+              }}>← RE-ADJUST</button>
+              <button
+                disabled={processing || !finalImage}
+                onClick={() => { onUse(finalImage); }}
+                style={{
+                  flex:2, padding:"12px 0",
+                  background:!processing&&finalImage?T.gold:T.surface,
+                  color:!processing&&finalImage?"#000":T.muted,
+                  border:"none", borderRadius:8,
+                  fontWeight:800, fontSize:14,
+                  cursor:!processing&&finalImage?"pointer":"not-allowed",
+                  letterSpacing:"0.08em"
+                }}>✓ USE THIS SCAN</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hidden elements */}
+      <canvas ref={captureRef} style={{ display:"none" }}/>
+      <canvas ref={outputRef}  style={{ display:"none" }}/>
+      <input ref={fileInputRef} type="file" accept="image/*"
+        capture="environment" style={{ display:"none" }} onChange={handleFile}/>
     </div>
   );
 }
