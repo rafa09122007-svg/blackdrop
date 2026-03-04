@@ -1,1426 +1,744 @@
-import React, { useState, useMemo, useEffect } from "react";
-
-export default function SubmitTicket({ phone, onComplete, editTicket }){
-const scrollRef = React.useRef(null);
-const [isSubmitting, setIsSubmitting] = useState(false);
-
-// timezone date
-const now = new Date();
-const today =
-now.getFullYear() +
-"-" +
-String(now.getMonth()+1).padStart(2,"0") +
-"-" +
-String(now.getDate()).padStart(2,"0");
-
-const [form,setForm]=useState(() => {
-
-  if (!editTicket) {
-    return {
-      client:"",
-      fieldTicket:"",
-      dispatch:"",
-      unit:"",
-      driver:"",
-      workDate:today,
-      wellLease:"",
-      notes:"",
-      fieldTicketImage:""
-    };
-  }
-
-  return {
-    client: editTicket["Client"] || "",
-    fieldTicket: editTicket["Field Ticket #"] || "",
-    dispatch: editTicket["Dispatch #"] || "",
-    unit: editTicket["Unit #"] || "",
-    driver: editTicket["Driver"] || "",
-    workDate: editTicket["Service Date"] || today,
-    wellLease: editTicket["Well/Lease"] || "",
-    notes: editTicket["Notes"] || "",
-    fieldTicketImage:""
-  };
-});
-
-function update(name,value){
-setForm(prev=>({...prev,[name]:value}));
-}
-
-
-const [loads,setLoads]=useState([
-{
-id:1,
-geminiRef:"",
-loadTicket:"",
-fluid:"Fresh Water",
-bbls:"",
-manifestOps:{
-washOut:false,
-unload:false
-},
-verificationImage:""
-}
-]);
-
-function updateLoad(index,field,value){
-setLoads(prev=>{
-const copy=[...prev];
-copy[index][field]=value;
-return copy;
-});
-}
-
-function addLoad(){
-setLoads(prev=>[
-...prev,
-{
-id:prev.length+1,
-geminiRef:"",
-loadTicket:"",
-fluid:"Fresh Water",
-bbls:"",
-manifestOps:{
-washOut:false,
-unload:false
-}
-}
-]);
-}
-
-function deleteLoad(index){
-setLoads(prev=>prev.filter((_,i)=>i!==index));
-}
-
-function toggleManifestOp(index,op){
-setLoads(prev=>{
-const copy=[...prev];
-copy[index].manifestOps[op]=!copy[index].manifestOps[op];
-return copy;
-});
-}
-
-const [submissionId] = useState(
-  editTicket ? editTicket["Submission ID"] : null
-);
-
-
-//get totals
-const totalBBLS=useMemo(()=>{
-return loads.reduce((sum,l)=>{
-const num=parseFloat(l.bbls);
-return sum+(isNaN(num)?0:num);
-},0);
-},[loads]);
-
-//signature handle
-const sigCanvasRef = React.useRef(null);
-const drawingRef = React.useRef(false);
-const lastPtRef = React.useRef({ x: 0, y: 0 });
-const [hasSignature, setHasSignature] = useState(false);
-
-function getCanvasPoint(e) {
-  const canvas = sigCanvasRef.current;
-  const rect = canvas.getBoundingClientRect();
-
-  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-
-  return {
-    x: (clientX - rect.left) * scaleX,
-    y: (clientY - rect.top) * scaleY
-  };
-}
-
-function startDraw(e) {
-  if (e.type === "touchstart") {
-}
-  const canvas = sigCanvasRef.current;
-  const ctx = canvas.getContext("2d");
-
-  drawingRef.current = true;
-
-  const p = getCanvasPoint(e);
-  lastPtRef.current = p;
-
-  ctx.lineWidth = 2.25;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = "#000";
-
-  ctx.beginPath();
-  ctx.moveTo(p.x, p.y);
-}
-
-function draw(e) {
-  if (!drawingRef.current) return;
-
-  const canvas = sigCanvasRef.current;
-  const ctx = canvas.getContext("2d");
-
-  const p = getCanvasPoint(e);
-
-  // drawing
-  ctx.lineTo(p.x, p.y);
-  ctx.stroke();
-
-  lastPtRef.current = p;
-  setHasSignature(true);
-}
-
-function endDraw() {
-  if (!drawingRef.current) return;
-  drawingRef.current = false;
-
-  const canvas = sigCanvasRef.current;
-  const ctx = canvas.getContext("2d");
-  ctx.closePath();
-}
-
-function clearSignature() {
-  const canvas = sigCanvasRef.current;
-  const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.beginPath();
-  setHasSignature(false);
-}
-
-
-
-function isNonEmpty(v) {
-  return String(v ?? "").trim().length > 0;
-}
-const isExxon = form.client === "Exxon";
-
-function loadComplete(load) {
-
-  const baseRequired =
-  (!isExxon || isNonEmpty(load.geminiRef)) &&
-  isNonEmpty(load.loadTicket) &&
-  isNonEmpty(load.bbls) &&
-  !isNaN(parseFloat(load.bbls));
-
-  // Manifest options
-  if (load.fluid === "Manifest") {
-    return (
-      baseRequired &&
-      (load.manifestOps.washOut || load.manifestOps.unload)
-    );
-  }
-
-  return baseRequired;
-}
-
-const requiredChecks = useMemo(() => {
-  // requireds
-  const checks = [
-    { key: "client", ok: isNonEmpty(form.client) },
-    { key: "fieldTicket", ok: isNonEmpty(form.fieldTicket) },
-    { key: "dispatch", ok: isNonEmpty(form.dispatch) },
-    { key: "unit", ok: isNonEmpty(form.unit) },
-    { key: "driver", ok: isNonEmpty(form.driver) },
-    { key: "workDate", ok: isNonEmpty(form.workDate) },
-    { key: "wellLease", ok: isNonEmpty(form.wellLease) },
-    { key: "fieldTicketImage", ok: isNonEmpty(form.fieldTicketImage) },
-    { key: "signature", ok: hasSignature }
-  ];
-
-  // Each load requireds
-    loads.forEach((l, i) => {
-    checks.push({ key: `load_${i}`, ok: loadComplete(l) });
-  });
-
-  return checks;
-}, [form, loads, hasSignature]);
-
-
-//Progress bar handle
-const progress = useMemo(() => {
-  const total = requiredChecks.length;
-  const filled = requiredChecks.filter(c => c.ok).length;
-  return Math.round((filled / total) * 100);
-}, [requiredChecks]);
-
-const isComplete = useMemo(() => {
-  return requiredChecks.every(c => c.ok);
-}, [requiredChecks]);
-
-
-//Scanner Handle
-
-const [scannerOpen,setScannerOpen]=useState(false);
-const [scannerTarget,setScannerTarget]=useState(null);
-
-function openFieldScanner(){
-setScannerTarget({type:"field"});
-setScannerOpen(true);
-}
-
-function openLoadScanner(index){
-setScannerTarget({type:"load",index});
-setScannerOpen(true);
-}
-
-function handleScanUse(imageData){
-if(!scannerTarget) return;
-
-if(scannerTarget.type==="field"){
-setForm(prev=>({...prev,fieldTicketImage:imageData}));
-}
-
-if(scannerTarget.type==="load"){
-setLoads(prev=>{
-const copy=[...prev];
-copy[scannerTarget.index].verificationImage=imageData;
-return copy;
-});
-}
-
-setScannerOpen(false);
-setScannerTarget(null);
-}
-
-const [scrollY,setScrollY]=useState(0);
-
-useEffect(() => {
-  async function syncOfflineTickets() {
-    const pending = JSON.parse(localStorage.getItem("offlineTickets") || "[]");
-    if (!pending.length) return;
-
-    for (let ticket of pending) {
-      try { // also add updated here
-        await fetch("https://script.google.com/macros/s/AKfycbwDJZilqySP8zZBHetfQyd-xloh3dz_eKbpwwkLiKohqeQDIRPM8L_H6AjtTU7CSYaT/exec", {
-          method: "POST",
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body: JSON.stringify(ticket)
-        });
-      } catch {
-        return; // still offline
-      }
-    }
-
-    localStorage.removeItem("offlineTickets");
-    alert("Offline tickets synced.");
-  }
-
-  window.addEventListener("online", syncOfflineTickets);
-  syncOfflineTickets();
-}, []);
-
-useEffect(() => {
-  const handleScroll = () => {
-    setScrollY(window.pageYOffset);
-  };
-
-  window.addEventListener("scroll", handleScroll);
-
-  return () => window.removeEventListener("scroll", handleScroll);
-}, []);
-
-const progressTranslate = Math.min(scrollY * 0.2, 40);
-
-const dispatchLabel = (() => {
-  if (form.client === "Exxon") return "GEMINI DISPATCH #";
-  if (form.client === "Oxy") return "IRONSIGHT JOB #";
-  if (form.client === "Western Midstream") return "IRONSIGHT JOB #";
-  if (form.client === "Chevron") return "DISPATCH #";
-  if (form.client === "Other") return "DISPATCH #";
-  return "DISPATCH #";
-})();
-
-return(
-
-<div style={S.container}>
-
-<div ref={scrollRef} style={S.card}>
-
-<div style={S.header}>
-BLACK DROP | FIELD COMMAND
-</div>
-
-<div style={S.cloud}>
-● CLOUD SYSTEM ONLINE
-</div>
-
-<div style={S.progressSticky}>
-
-  <div
-    style={{
-      transform: `translateY(${progressTranslate}px)`,
-      transition: "transform 0.08s linear"
-    }}
-  >
-
-    <div style={S.progressTop}>
-      <span style={S.keep}>KEEP GOING...</span>
-      <span style={S.percent}>{progress}%</span>
+import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
+import { API_URL, T, injectGlobalStyles } from "./shared";
+import {
+  PageShell, Label, Input, Textarea, Select,
+  GoldBtn, GhostBtn, SectionCard, Spinner, ErrorMsg,
+} from "./shared";
+
+// ── Scanner Modal ─────────────────────────────────────────────────────────────
+function ScannerModal({ open, onClose, onUse }) {
+  const [preview, setPreview] = useState(null);
+  const [busy,    setBusy]    = useState(false);
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    if (open) { setPreview(null); document.body.style.overflow = "hidden"; }
+    else       { document.body.style.overflow = ""; }
+    return () => { document.body.style.overflow = ""; };
+  }, [open]);
+
+  const handleFile = useCallback(e => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    e.target.value = "";
+    setBusy(true);
+    const reader = new FileReader();
+    reader.onload = ev => { setPreview(ev.target.result); setBusy(false); };
+    reader.readAsDataURL(f);
+  }, []);
+
+  const handleUse = useCallback(() => {
+    if (preview) { onUse(preview); onClose(); }
+  }, [preview, onUse, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9999, background: "#000",
+      display: "flex", flexDirection: "column", overflow: "hidden",
+    }}>
+      {/* Header */}
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "12px 16px", background: T.card,
+        borderBottom: `1px solid ${T.border}`, flexShrink: 0,
+      }}>
+        <button onClick={onClose} aria-label="Close scanner" style={{
+          width: 38, height: 38, borderRadius: 10, background: T.surface,
+          border: `1px solid ${T.border}`, color: T.text,
+          cursor: "pointer", fontSize: 16, display: "flex",
+          alignItems: "center", justifyContent: "center",
+        }}>✕</button>
+        <div style={{ color: T.gold, fontSize: 13, fontWeight: 700, letterSpacing: "0.12em" }}>
+          📷 SCAN / UPLOAD DOCUMENT
+        </div>
+        <div style={{ width: 38 }} />
+      </div>
+
+      {/* Preview */}
+      <div style={{
+        flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
+        background: "#060606", padding: 16, overflow: "hidden",
+      }}>
+        {busy && (
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
+            <Spinner size={36} />
+            <div style={{ color: T.muted, fontSize: 12 }}>LOADING IMAGE…</div>
+          </div>
+        )}
+        {!busy && !preview && (
+          <div style={{ textAlign: "center", color: T.muted }}>
+            <div style={{ fontSize: 56, marginBottom: 14 }}>📄</div>
+            <div style={{ fontSize: 14 }}>Tap below to choose a photo or take one</div>
+          </div>
+        )}
+        {!busy && preview && (
+          <img
+            src={preview}
+            alt="Document preview"
+            style={{
+              maxWidth: "100%", maxHeight: "100%", objectFit: "contain",
+              borderRadius: 6, boxShadow: `0 0 0 1px rgba(212,175,55,0.3)`,
+            }}
+          />
+        )}
+      </div>
+
+      {/* Controls */}
+      <div style={{
+        flexShrink: 0, background: T.card,
+        borderTop: `1px solid ${T.border}`, padding: "12px 16px 24px",
+      }}>
+        <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+          <button onClick={() => fileRef.current?.click()} style={{
+            flex: 1, height: 52, background: T.surface, color: T.text,
+            border: `1px solid ${T.border}`, borderRadius: 12,
+            fontWeight: 600, fontSize: 14, cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          }}>
+            📁 Choose / Take Photo
+          </button>
+          <button onClick={handleUse} disabled={!preview} style={{
+            flex: 1, height: 52, border: "none", borderRadius: 12,
+            fontWeight: 800, fontSize: 14, letterSpacing: "0.08em",
+            background: preview ? T.gold : T.surface,
+            color: preview ? "#000" : T.muted,
+            cursor: preview ? "pointer" : "not-allowed",
+          }}>
+            ✓ USE SCAN
+          </button>
+        </div>
+        <button onClick={onClose} style={{
+          width: "100%", height: 42, background: "transparent", color: T.muted,
+          border: `1px solid ${T.border}`, borderRadius: 10,
+          fontWeight: 600, fontSize: 13, cursor: "pointer",
+        }}>
+          ✕ CANCEL
+        </button>
+      </div>
+
+      <input
+        ref={fileRef} type="file" accept="image/*" capture="environment"
+        style={{ display: "none" }} onChange={handleFile}
+      />
     </div>
-
-    <div style={S.progressBar}>
-      <div style={{ ...S.progressFill, width: progress + "%" }} />
-    </div>
-
-  </div>
-
-</div>
-
-<Label text="CLIENT ORGANIZATION" required/>
-
-<select
-style={S.input}
-value={form.client}
-onChange={e=>update("client",e.target.value)}
->
-<option value="">Select Client...</option>
-<option>Exxon</option>
-<option>Oxy</option>
-<option>Western Midstream</option>
-<option>Chevron</option>
-<option>Other</option>
-</select>
-
-
-<div style={S.row}>
-
-<div style={S.col}>
-<Label text="FIELD TICKET #" required/>
-<input
-style={S.input}
-value={form.fieldTicket}
-onChange={e=>update("fieldTicket",e.target.value)}
-/>
-</div>
-
-<div style={S.col}>
-<Label text={dispatchLabel} required/>
-<input
-style={S.input}
-value={form.dispatch}
-onChange={e=>update("dispatch",e.target.value)}
-/>
-</div>
-
-</div>
-
-
-<div style={S.row}>
-
-<div style={S.col}>
-<Label text="UNIT / TRUCK #" required/>
-<input
-style={S.input}
-value={form.unit}
-onChange={e=>update("unit",e.target.value)}
-/>
-</div>
-
-<div style={S.col}>
-<Label text="DRIVER NAME" required/>
-<input
-style={S.input}
-value={form.driver}
-onChange={e=>update("driver",e.target.value)}
-/>
-</div>
-
-</div>
-
-
-<Label text="WORK DATE" required/>
-
-<input
-type="date"
-style={S.inputDate}
-value={form.workDate}
-onChange={e=>update("workDate",e.target.value)}
-/>
-
-
-<Label text="WELL / LEASE NAME" required/>
-
-<input
-style={S.input}
-value={form.wellLease}
-onChange={e=>update("wellLease",e.target.value)}
-/>
-
-
-<Label text="NOTES / DESCRIPTION"/>
-
-<textarea
-style={S.textarea}
-placeholder="Add job specifics here..."
-value={form.notes}
-onChange={e=>update("notes",e.target.value)}
-/>
-<Label text="FIELD TICKET PHOTO" required/>
-
-<div
-style={S.scanBox}
-onClick={openFieldScanner}
->
-{form.fieldTicketImage ? (
-<img
-src={form.fieldTicketImage}
-style={S.scanPreview}
-/>
-) : (
-<div style={S.scanText}>
-📄 SCAN FIELD TICKET
-</div>
-)}
-</div>
-
-<div style={S.manifestHeader}>
-
-<span style={S.manifestTitle}>
-LOAD MANIFEST
-</span>
-
-<div style={S.totalBox}>
-<span style={S.totalLabel}>TOTAL:</span>{" "}
-<span style={S.totalValue}>{totalBBLS.toFixed(2)} BBLS</span>
-</div>
-
-</div>
-
-{loads.map((load,index)=>(
-
-<div key={load.id} style={S.loadCard}>
-
-<div style={S.loadHeader}>
-
-<div style={S.loadBadge}>
-LOAD {String(load.id).padStart(2,"0")}
-</div>
-
-<div style={S.loadEntry}>
-ENTRY DETAIL
-</div>
-
-{loads.length>1 && (
-<button
-type="button"
-style={S.deleteBtn}
-onClick={()=>deleteLoad(index)}
-aria-label="Delete load"
->
-🗑
-</button>
-)}
-
-</div>
-
-{isExxon && (
-  <>
-    <Label text="GEMINI DISPATCH REF #" required/>
-
-    <input
-      style={S.input}
-      value={load.geminiRef}
-      onChange={e=>updateLoad(index,"geminiRef",e.target.value)}
-    />
-  </>
-)}
-<Label text="LOAD TICKET NUMBER" required/>
-<input
-style={S.input}
-value={load.loadTicket}
-onChange={e=>updateLoad(index,"loadTicket",e.target.value)}
-/>
-
-<div style={S.row}>
-<div style={S.col}>
-
-<Label text="FLUID CLASSIFICATION"/>
-
-<select
-style={S.input}
-value={load.fluid}
-onChange={e=>updateLoad(index,"fluid",e.target.value)}
->
-<option>Fresh Water</option>
-<option>Brine Water</option>
-<option>Disposal Water</option>
-<option>Manifest</option>
-</select>
-
-</div>
-
-<div style={S.col}>
-
-<Label text="QUANTITY (BBLS)" required/>
-
-<input
-type="number"
-style={S.input}
-value={load.bbls}
-onChange={e=>updateLoad(index,"bbls",e.target.value)}
-/>
-</div>
-
-</div>
-<div style={S.qtyRow}>
-
-{[90,100,120,130,150,200].map(q=>(
-<button
-type="button"
-key={q}
-style={S.qtyBtn}
-onClick={()=>updateLoad(index,"bbls",String(q))}
->
-{q}
-</button>
-))}
-</div>
-<Label text="TICKET VERIFICATION IMAGE"/>
-
-<div
-style={S.scanBox}
-onClick={()=>openLoadScanner(index)}
->
-{load.verificationImage ? (
-<img
-src={load.verificationImage}
-style={S.scanPreview}
-/>
-) : (
-<div style={S.scanText}>
-🧾 SCAN LOAD TICKET
-
-</div>
-)}
-</div>
-
-
-{load.fluid==="Manifest" && (
-
-<div style={S.manifestOpsCard}>
-
-<div style={S.manifestOpsHeader}>
-<span>MANIFEST OPERATIONS</span>
-<span style={S.requiredBadge}>
-REQUIRED SELECTION
-</span>
-</div>
-
-<div style={S.manifestOpsButtons}>
-
-<button
-type="button"
-style={{
-...S.manifestOpBtn,
-...(load.manifestOps.washOut?S.manifestOpActive:{})
-}}
-onClick={()=>toggleManifestOp(index,"washOut")}
->
-WASH OUT
-</button>
-
-<button
-type="button"
-style={{
-...S.manifestOpBtn,
-...(load.manifestOps.unload?S.manifestOpActive:{})
-}}
-onClick={()=>toggleManifestOp(index,"unload")}
->
-UNLOAD
-</button>
-</div>
-</div>
-)}
-
-</div>
-
-))}
-
-
-<button
-type="button"
-style={S.addLoadBtn}
-onClick={addLoad}
->
-+ ADD ADDITIONAL LOAD
-</button>
-
-<Label text="OPERATOR CONFIRMATION SIGNATURE" required/>
-
-<canvas
-  ref={sigCanvasRef}
-  width={900}
-  height={300}
-  style={{
-    width:"100%",
-    height:160,
-    background:"#fff",
-    borderRadius:6,
-    marginTop:12,
-    touchAction:"none" // important for mobile
-  }}
-  onMouseDown={startDraw}
-  onMouseMove={draw}
-  onMouseUp={endDraw}
-  onMouseLeave={endDraw}
-  onTouchStart={startDraw}
-  onTouchMove={draw}
-  onTouchEnd={endDraw}
-/>
-
-<button
-  type="button"
-  style={S.addLoadBtn}
-  onClick={clearSignature}
->
-  CLEAR SIGNATURE
-</button>
-
-<div style={{
-  marginTop:20,
-  padding:20,
-  background:"#111827",
-  borderRadius:6
-}}>
-
-  <div style={{color:"#9ca3af",fontSize:12}}>
-    MANIFEST VOLUME AUDIT
-  </div>
-
-  <div style={{
-    fontSize:32,
-    fontWeight:800,
-    marginTop:10,
-    color:"#D4AF37"
-  }}>
-    {totalBBLS.toFixed(2)} BBLS
-  </div>
-
-</div>
-
-<button
-  type="button"
-  style={{
-    marginTop:20,
-    padding:16,
-    width:"100%",
-    background: (isComplete && !isSubmitting) ? "#D4AF37" : "#444",
-    color: (isComplete && !isSubmitting) ? "#000" : "#bbb",
-    border:"none",
-    borderRadius:6,
-    fontWeight:"bold",
-    cursor: (isComplete && !isSubmitting) ? "pointer" : "not-allowed",
-    opacity: (isComplete && !isSubmitting) ? 1 : 0.8,
-    display:"flex",
-    alignItems:"center",
-    justifyContent:"center",
-    gap:10
-  }}
-  disabled={!isComplete || isSubmitting}
-  onClick={async () => {
-
-    if (!isComplete || isSubmitting) return;
-
-    setIsSubmitting(true);
-
-    try {
-
-      const payload = {
-  submissionId: submissionId || null,
-  phone,
-  ...form,
-  loads,
-  totalBBLS,
-  signature: sigCanvasRef.current.toDataURL("image/png")
-};
-
-      const res = await fetch( // must match current web app version
-        "https://script.google.com/macros/s/AKfycbwDJZilqySP8zZBHetfQyd-xloh3dz_eKbpwwkLiKohqeQDIRPM8L_H6AjtTU7CSYaT/exec",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "text/plain;charset=utf-8"
-          },
-          body: JSON.stringify(payload)
-        }
-      );
-
-      await res.text();
-      setIsSubmitting(false);
-      console.log("Calling onComplete");
-      onComplete();
-
-    } catch {
-  // Save locally if offline
-  const pending = JSON.parse(localStorage.getItem("offlineTickets") || "[]");
-  pending.push(payload);
-  localStorage.setItem("offlineTickets", JSON.stringify(pending));
-
-  alert("No internet. Ticket saved offline and will send automatically.");
-
-  setIsSubmitting(false);
-}
-
-
-
-
-  }}
->
-  {isSubmitting && (
-    <div style={S.spinner}></div>
-  )}
-  {isSubmitting ? "Submitting..." : "Submit Final Ticket"}
-</button>
-
-<ScannerModal
-open={scannerOpen}
-onClose={()=>setScannerOpen(false)}
-onUse={handleScanUse}
-/>
-</div>
-</div>
-);
-}
-
-function Label({text,required}){
-return(
-<div style={S.label}>
-{text}
-{required&&<span style={S.req}> *</span>}
-</div>
-);
-}
-
-const S={
-
-container:{
-  background:"#000",
-  minHeight:"100vh",
-  width:"100%",
-  display:"flex",
-  justifyContent:"center",
-  alignItems:"flex-start",
-  padding:"20px 10px",
-  boxSizing:"border-box"
-},
-
-spinner:{
-  width:16,
-  height:16,
-  border:"2px solid rgba(0,0,0,0.3)",
-  borderTop:"2px solid black",
-  borderRadius:"50%",
-  animation:"spin 0.8s linear infinite"
-},
-
-card:{
-width:"100%",
-maxWidth:520,
-minWidth:0,
-boxSizing:"border-box",
-background:"#0b0b0b",
-padding:"18px",
-overflow:"hidden"
-},
-
-header:{
-color:"#D4AF37",
-textAlign:"center"
-},
-
-cloud:{
-color:"#00ffc3",
-textAlign:"center"
-},
-
-progressSticky:{
-position:"sticky",
-top:0,
-background:"#0b0b0b",
-zIndex:50,
-paddingBottom:10,
-willChange:"transform"
-},
-
-progressTop:{
-display:"flex",
-justifyContent:"space-between",
-color:"#aaa",
-fontSize:12
-},
-
-keep:{color:"#888"},
-
-percent:{
-color:"#D4AF37"
-},
-
-scanBox:{
-marginTop:12,
-padding:20,
-border:"1px dashed #374151",
-borderRadius:6,
-background:"#0f172a",
-cursor:"pointer",
-textAlign:"center"
-},
-
-scanText:{
-color:"#e5e7eb",
-fontWeight:600
-},
-
-scanPreview:{
-width:"100%",
-borderRadius:6,
-border:"1px solid #374151"
-},
-
-progressBar:{
-height:3,
-background:"#222"
-},
-
-progressFill:{
-height:"100%",
-background:"#D4AF37"
-},
-
-label:{
-color:"#9ca3af",
-marginTop:14,
-fontSize:12
-},
-
-req:{color:"#ef4444"},
-
-row:{
-display:"grid",
-gridTemplateColumns:"repeat(auto-fit,minmax(0,1fr))",
-gap:12,
-width:"100%"
-},
-
-col:{
-width:"100%",
-minWidth:0
-},
-
-input:{
-width:"100%",
-boxSizing:"border-box",
-padding:12,
-background:"#0f172a",
-border:"1px solid #2a3441",
-color:"#e5e7eb",
-borderRadius:6,
-fontSize:14
-},
-
-// date icon visible
-inputDate:{
-width:"100%",
-boxSizing:"border-box",
-padding:12,
-background:"#0f172a",
-border:"1px solid #2a3441",
-color:"#e5e7eb",
-borderRadius:6,
-fontSize:14,
-WebkitAppearance:"none",
-appearance:"none"
-},
-
-textarea:{
-width:"100%",
-boxSizing:"border-box",
-background:"#0f172a",
-border:"1px solid #2a3441",
-color:"#e5e7eb",
-borderRadius:6,
-padding:14,
-minHeight:140,
-maxHeight:360,
-resize:"vertical",
-fontSize:14,
-lineHeight:"20px"
-},
-
-manifestHeader:{
-display:"flex",
-justifyContent:"space-between",
-alignItems:"center",
-marginTop:30,
-gap:12
-},
-
-manifestTitle:{
-color:"#D4AF37",
-fontWeight:700
-},
-
-totalBox:{
-background:"#12151c",
-border:"1px solid #2a3441",
-borderRadius:6,
-padding:"6px 12px",
-color:"#e5e7eb",
-whiteSpace:"nowrap"
-},
-
-totalLabel:{
-color:"#9ca3af",
-fontWeight:600
-},
-
-totalValue:{
-color:"#D4AF37",
-fontWeight:800
-},
-
-loadCard:{
-background:"#111827",
-borderLeft:"4px solid #D4AF37",
-padding:16,
-marginTop:12,
-borderRadius:6,
-boxSizing:"border-box"
-},
-
-loadHeader:{
-display:"flex",
-alignItems:"center",
-gap:10
-},
-
-loadBadge:{
-background:"#D4AF37",
-color:"#000",
-padding:"4px 10px",
-borderRadius:4,
-fontWeight:800,
-fontSize:12
-},
-
-loadEntry:{
-color:"#9ca3af",
-fontSize:12
-},
-
-deleteBtn:{
-marginLeft:"auto",
-background:"transparent",
-border:"1px solid #374151",
-color:"#e5e7eb",
-borderRadius:6,
-padding:"4px 8px",
-cursor:"pointer",
-lineHeight:"16px"
-},
-
-qtyRow:{
-display:"flex",
-flexWrap:"wrap",
-gap:8,
-marginTop:10,
-alignItems:"center"
-},
-
-qtyBtn:{
-minWidth:46,
-height:34,
-display:"inline-flex",
-alignItems:"center",
-justifyContent:"center",
-background:"#1f2937",
-color:"#e5e7eb",
-border:"1px solid #374151",
-borderRadius:6,
-cursor:"pointer",
-fontSize:12
-},
-
-manifestOpsCard:{
-border:"1px solid #374151",
-borderRadius:6,
-padding:12,
-marginTop:14
-},
-
-manifestOpsHeader:{
-display:"flex",
-justifyContent:"space-between",
-color:"#9ca3af",
-fontSize:12,
-marginBottom:10
-},
-
-requiredBadge:{
-background:"#374151",
-padding:"2px 6px",
-borderRadius:4,
-fontSize:10,
-color:"#e5e7eb"
-},
-
-manifestOpsButtons:{
-display:"flex",
-gap:10
-},
-
-manifestOpBtn:{
-flex:1,
-textAlign:"center",
-padding:10,
-border:"1px solid #374151",
-color:"#e5e7eb",
-borderRadius:6,
-background:"transparent",
-cursor:"pointer"
-},
-
-manifestOpActive:{
-background:"#D4AF37",
-color:"#000",
-border:"1px solid #D4AF37"
-},
-
-addLoadBtn:{
-marginTop:16,
-padding:14,
-width:"100%",
-border:"1px dashed #374151",
-borderRadius:6,
-cursor:"pointer",
-textAlign:"center",
-background:"transparent",
-color:"#e5e7eb"
-}
-
-};
-
-function ScannerModal({open,onClose,onUse}){
-
-const videoRef=React.useRef(null);
-const canvasRef=React.useRef(null);
-const streamRef=React.useRef(null);
-const fileInputRef = React.useRef(null);
-const cameraInputRef = React.useRef(null);
-const [captured,setCaptured]=React.useState(null);
-const [cropRect, setCropRect] = React.useState(null);
-const dragRef = React.useRef(null);
-const [ready,setReady] = React.useState(false);
-
-React.useEffect(() => {
-  if (!open) return;
-
-  let active = true;
-
-  async function initCamera() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
-        }
-      });
-
-      if (!active) return;
-
-      streamRef.current = stream;
-
-      const video = videoRef.current;
-      if (!video) return;
-
-      video.srcObject = stream;
-      await video.play();
-
-      setReady(true);
-
-    } catch (err) {
-      console.error("Camera error:", err);
-    }
-  }
-
-  setCaptured(null);
-  setReady(false);
-
-  initCamera();
-
-  return () => {
-    active = false;
-
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => t.stop());
-      streamRef.current = null;
-    }
-
-    setReady(false);
-  };
-
-}, [open]);
-
-function enhanceScanLook(canvas) {
-  const ctx = canvas.getContext("2d");
-
-  ctx.filter = "brightness(160%) contrast(160%)";
-  ctx.drawImage(canvas, 0, 0);
-
-  ctx.filter = "none";
-}
-
-function capture() {
-  const video = videoRef.current;
-  if (!video) return;
-
-  const canvas = canvasRef.current;
-
-  const videoWidth = video.videoWidth;
-  const videoHeight = video.videoHeight;
-
-  const cropX = videoWidth * 0.10;
-  const cropY = videoHeight * 0.15;
-  const cropW = videoWidth * 0.80;
-  const cropH = videoHeight * 0.70;
-
-  canvas.width = cropW;
-  canvas.height = cropH;
-
-  const ctx = canvas.getContext("2d");
-
-  ctx.drawImage(
-    video,
-    cropX,
-    cropY,
-    cropW,
-    cropH,
-    0,
-    0,
-    cropW,
-    cropH
   );
-
-  const data = canvas.toDataURL("image/png"); // PNG for sharp text
-  setCaptured(data);
 }
 
-function handleFileUpload(e){
-const file = e.target.files[0];
-if(!file) return;
+// ── Load Card ─────────────────────────────────────────────────────────────────
+const QUICK_BBLS = [90, 100, 120, 130, 150, 200];
+const FLUID_TYPES = ["Fresh Water", "Brine Water", "Disposal Water", "Manifest"];
+const CLIENTS     = ["Exxon", "Oxy", "Western Midstream", "Chevron", "Other"];
 
-const reader = new FileReader();
-reader.onload = function(event){
-const img = new Image();
-img.onload = function(){
-
-const canvas = canvasRef.current;
-canvas.width = img.width;
-canvas.height = img.height;
-
-const ctx = canvas.getContext("2d");
-ctx.drawImage(img, 0, 0);
-
-enhanceScanLook(canvas);
-
-const data = canvas.toDataURL("image/jpeg", 0.9);
-setCaptured(data);
-};
-img.src = event.target.result;
-};
-reader.readAsDataURL(file);
+function makeLoad(id) {
+  return { id, geminiRef: "", loadTicket: "", fluid: "Fresh Water",
+           bbls: "", manifestOps: { washOut: false, unload: false }, verificationImage: "" };
 }
 
-React.useEffect(()=>{
-  function move(e){
-    if(!dragRef.current || !cropRect) return;
+function LoadCard({ load, index, isExxon, onUpdate, onDelete, onScan, canDelete }) {
+  return (
+    <div style={{
+      background: T.bg, borderRadius: 8, padding: 14,
+      border: `1px solid ${T.border}`, marginBottom: 10,
+      borderLeft: `3px solid ${T.gold}`,
+    }}>
+      {/* Load header */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+        <span style={{
+          background: T.gold, color: "#000", padding: "2px 8px",
+          borderRadius: 4, fontWeight: 800, fontSize: 11,
+        }}>
+          LOAD {String(index + 1).padStart(2, "0")}
+        </span>
+        {canDelete && (
+          <button
+            onClick={onDelete}
+            aria-label={`Delete load ${index + 1}`}
+            style={{
+              marginLeft: "auto", background: "transparent",
+              border: `1px solid ${T.border}`, color: T.danger,
+              borderRadius: 6, padding: "2px 8px", cursor: "pointer", fontSize: 12,
+            }}
+          >
+            ✕ Remove
+          </button>
+        )}
+      </div>
 
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      {isExxon && (
+        <>
+          <Label text="Gemini Dispatch Ref #" required />
+          <Input value={load.geminiRef} onChange={e => onUpdate("geminiRef", e.target.value)} />
+        </>
+      )}
 
-    const dx = clientX - dragRef.current.startX;
-    const dy = clientY - dragRef.current.startY;
+      <Label text="Load Ticket Number" required />
+      <Input value={load.loadTicket} onChange={e => onUpdate("loadTicket", e.target.value)} />
 
-    dragRef.current.startX = clientX;
-    dragRef.current.startY = clientY;
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div>
+          <Label text="Fluid Type" />
+          <Select value={load.fluid} onChange={e => onUpdate("fluid", e.target.value)}>
+            {FLUID_TYPES.map(f => <option key={f}>{f}</option>)}
+          </Select>
+        </div>
+        <div>
+          <Label text="Quantity (BBLs)" required />
+          <Input
+            type="number" inputMode="decimal"
+            value={load.bbls} onChange={e => onUpdate("bbls", e.target.value)}
+          />
+        </div>
+      </div>
 
-    setCropRect(prev=>{
-      if(!prev) return prev;
-      return {
-        ...prev,
-        x: prev.x + dx * (canvasRef.current.width / window.innerWidth),
-        y: prev.y + dy * (canvasRef.current.height / window.innerWidth)
-      };
-    });
-  }
+      {/* Quick-fill buttons */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+        {QUICK_BBLS.map(q => {
+          const active = String(load.bbls) === String(q);
+          return (
+            <button
+              key={q}
+              onClick={() => onUpdate("bbls", String(q))}
+              style={{
+                padding: "5px 10px", borderRadius: 6, fontSize: 12, cursor: "pointer",
+                background: active ? "rgba(212,175,55,0.15)" : T.surface,
+                border: `1px solid ${active ? T.gold : T.border}`,
+                color: active ? T.gold : T.muted, transition: "all 0.12s",
+              }}
+            >
+              {q}
+            </button>
+          );
+        })}
+      </div>
 
-  function stop(){
-    dragRef.current=null;
-  }
-
-  window.addEventListener("mousemove",move);
-  window.addEventListener("mouseup",stop);
-  window.addEventListener("touchmove",move);
-  window.addEventListener("touchend",stop);
-
-  return ()=>{
-    window.removeEventListener("mousemove",move);
-    window.removeEventListener("mouseup",stop);
-    window.removeEventListener("touchmove",move);
-    window.removeEventListener("touchend",stop);
-  };
-},[cropRect]);
-
-if(!open) return null;
-
-return(
-<div style={M.overlay}>
-<div style={M.modal}>
-<div style={{ position: "relative" }}>
-
-  {/* VIDEO (always mounted) */}
-  <video
-    ref={videoRef}
-    style={{
-      ...M.video,
-      display: captured ? "none" : "block"
-    }}
-    playsInline
-    autoPlay
-  />
-
-  {/* IMAGE (only shown when captured) */}
-  {captured && (
-    <img
-      src={captured}
-      style={{ width: "100%", borderRadius: 8 }}
-      alt=""
-    />
-  )}
-
-  {/* Guide Box only when live */}
-  {!captured && (
-    <div
-      style={{
-        position: "absolute",
-        top: "15%",
-        left: "10%",
-        width: "80%",
-        height: "70%",
-        border: "3px solid #D4AF37",
-        boxSizing: "border-box",
-        pointerEvents: "none"
-      }}
-    />
-  )}
-</div>
-
-<div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-
-  {!captured ? (
-    <>
-      <button
-        style={M.primaryBtn}
-        onClick={capture}
-        disabled={!ready}
-      >
-        CAPTURE
-      </button>
-
-      <button
-        style={M.secondaryBtn}
-        onClick={() => fileInputRef.current.click()}
-      >
-        UPLOAD
-      </button>
-    </>
-  ) : (
-    <>
-      <button
-        style={M.secondaryBtn}
-        onClick={() => {
-          setCaptured(null);
-          setCropRect(null);
+      {/* Verification image */}
+      <Label text="Verification Image" />
+      <div
+        onClick={onScan}
+        role="button"
+        tabIndex={0}
+        onKeyDown={e => e.key === "Enter" && onScan()}
+        aria-label="Scan or upload load ticket"
+        style={{
+          border: `1px dashed ${load.verificationImage ? T.goldDim : T.border}`,
+          borderRadius: 8, cursor: "pointer", textAlign: "center",
+          background: T.card, overflow: "hidden",
+          padding: load.verificationImage ? 0 : 14,
         }}
       >
-        RETAKE
-      </button>
+        {load.verificationImage
+          ? <img src={load.verificationImage} alt="Load ticket" style={{ width: "100%", display: "block" }} />
+          : <div style={{ color: T.muted, fontSize: 12 }}>🧾 Scan load ticket</div>
+        }
+      </div>
+      {load.verificationImage && (
+        <button
+          onClick={() => onUpdate("verificationImage", "")}
+          style={{ marginTop: 4, background: "transparent", border: "none",
+            color: T.danger, fontSize: 11, cursor: "pointer" }}
+        >
+          ✕ Remove
+        </button>
+      )}
 
-      <button
-        style={M.primaryBtn}
-        onClick={() => onUse(captured)}
-      >
-        USE
-      </button>
-    </>
-  )}
-
-</div>
-
-<input
-  type="file"
-  accept="image/*"
-  ref={fileInputRef}
-  style={{ display: "none" }}
-  onChange={handleFileUpload}
-/>
-<canvas ref={canvasRef} style={{display:"none"}}/>
-<button style={M.closeBtn} onClick={onClose}>✕</button>
-</div>
-</div>
-);
+      {/* Manifest ops */}
+      {load.fluid === "Manifest" && (
+        <div style={{
+          marginTop: 10, border: `1px solid ${T.border}`, borderRadius: 8, padding: 12,
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between",
+            color: T.muted, fontSize: 10, marginBottom: 10 }}>
+            <span>MANIFEST OPERATIONS</span>
+            <span style={{ color: T.danger }}>REQUIRED SELECTION</span>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            {[["washOut", "WASH OUT"], ["unload", "UNLOAD"]].map(([op, label]) => (
+              <button
+                key={op}
+                onClick={() => onUpdate("manifestOps", {
+                  ...load.manifestOps, [op]: !load.manifestOps[op],
+                })}
+                style={{
+                  flex: 1, padding: "9px 0", borderRadius: 8,
+                  fontWeight: 700, fontSize: 12, cursor: "pointer", letterSpacing: "0.05em",
+                  border: `1px solid ${load.manifestOps[op] ? T.gold : T.border}`,
+                  background: load.manifestOps[op] ? "rgba(212,175,55,0.12)" : "transparent",
+                  color: load.manifestOps[op] ? T.gold : T.muted, transition: "all 0.15s",
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
-const M={
-overlay:{
-position:"fixed",
-inset:0,
-background:"rgba(0,0,0,0.8)",
-display:"flex",
-justifyContent:"center",
-alignItems:"center",
-zIndex:9999
-},
-modal:{
-position:"relative",
-width:"90%",
-maxWidth:520,
-background:"#0b0b0b",
-padding:20,
-borderRadius:8,
-textAlign:"center"
-},
-video:{
-width:"100%",
-borderRadius:8,
-marginBottom:12
-},
-primaryBtn:{
-padding:12,
-background:"#D4AF37",
-border:"none",
-borderRadius:6,
-fontWeight:"bold",
-cursor:"pointer"
-},
-secondaryBtn:{
-padding:12,
-background:"transparent",
-border:"1px solid #444",
-color:"#fff",
-borderRadius:6,
-cursor:"pointer"
-},
-closeBtn:{
-position:"absolute",
-top:20,
-right:20,
-background:"transparent",
-border:"1px solid #444",
-color:"#fff",
-borderRadius:6,
-padding:"4px 8px",
-cursor:"pointer"
-}
+// ── Main Component ────────────────────────────────────────────────────────────
+const DISPATCH_LABEL = {
+  Exxon: "GEMINI DISPATCH #",
+  Oxy: "IRONSIGHT JOB #",
+  "Western Midstream": "IRONSIGHT JOB #",
 };
+
+function todayStr() {
+  const n = new Date();
+  return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-${String(n.getDate()).padStart(2, "0")}`;
+}
+
+export default function SubmitTicket({ phone, onComplete, editTicket }) {
+  injectGlobalStyles();
+
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError,  setSubmitError]  = useState("");
+  const [scanTarget,   setScanTarget]   = useState(null);
+  const [scanOpen,     setScanOpen]     = useState(false);
+  const [hasSignature, setHasSignature] = useState(false);
+
+  const [submissionId] = useState(editTicket?.["Submission ID"] ?? null);
+
+  const [form, setForm] = useState(() => editTicket ? {
+    client:           editTicket["Client"]        ?? "",
+    fieldTicket:      editTicket["Field Ticket #"] ?? "",
+    dispatch:         editTicket["Dispatch #"]    ?? "",
+    unit:             editTicket["Unit #"]        ?? "",
+    driver:           editTicket["Driver"]        ?? "",
+    workDate:         editTicket["Service Date"]  ?? todayStr(),
+    wellLease:        editTicket["Well/Lease"]    ?? "",
+    notes:            editTicket["Notes"]         ?? "",
+    fieldTicketImage: "",
+    startTime:        editTicket["Start Time"]    ?? "",
+    endTime:          editTicket["End Time"]      ?? "",
+    hourlyRate:       editTicket["Hourly Rate"]   ?? "",
+  } : {
+    client: "", fieldTicket: "", dispatch: "", unit: "",
+    driver: "", workDate: todayStr(), wellLease: "", notes: "",
+    fieldTicketImage: "", startTime: "", endTime: "", hourlyRate: "",
+  });
+
+  const [loads, setLoads] = useState([makeLoad(1)]);
+
+  const sigRef  = useRef(null);
+  const drawing = useRef(false);
+
+  const isExxon = form.client === "Exxon";
+
+  // ── Form helpers ──────────────────────────────────────────────────────────
+  const update     = useCallback((k, v) => setForm(p => ({ ...p, [k]: v })), []);
+  const updateLoad = useCallback((i, k, v) => setLoads(p => {
+    const c = [...p]; c[i] = { ...c[i], [k]: v }; return c;
+  }), []);
+  const addLoad    = useCallback(() =>
+    setLoads(p => [...p, makeLoad(p.length + 1)]), []);
+  const deleteLoad = useCallback(i =>
+    setLoads(p => p.filter((_, idx) => idx !== i)), []);
+
+  const totalBBLS = useMemo(() =>
+    loads.reduce((s, l) => { const n = parseFloat(l.bbls); return s + (isNaN(n) ? 0 : n); }, 0),
+  [loads]);
+
+  // ── Validation ────────────────────────────────────────────────────────────
+  function nonEmpty(v) { return String(v ?? "").trim().length > 0; }
+
+  function loadOk(l) {
+    const base = (!isExxon || nonEmpty(l.geminiRef)) &&
+      nonEmpty(l.loadTicket) && nonEmpty(l.bbls) && !isNaN(parseFloat(l.bbls));
+    return l.fluid === "Manifest"
+      ? base && (l.manifestOps.washOut || l.manifestOps.unload)
+      : base;
+  }
+
+  const checks = useMemo(() => [
+    { key: "client",           ok: nonEmpty(form.client)           },
+    { key: "fieldTicket",      ok: nonEmpty(form.fieldTicket)      },
+    { key: "dispatch",         ok: nonEmpty(form.dispatch)         },
+    { key: "unit",             ok: nonEmpty(form.unit)             },
+    { key: "driver",           ok: nonEmpty(form.driver)           },
+    { key: "workDate",         ok: nonEmpty(form.workDate)         },
+    { key: "wellLease",        ok: nonEmpty(form.wellLease)        },
+    { key: "fieldTicketImage", ok: nonEmpty(form.fieldTicketImage) },
+    { key: "signature",        ok: hasSignature                    },
+    ...loads.map((l, i) => ({ key: `load_${i}`, ok: loadOk(l) })),
+  ], [form, loads, hasSignature]);
+
+  const progress   = useMemo(() => Math.round(checks.filter(c => c.ok).length / checks.length * 100), [checks]);
+  const isComplete = useMemo(() => checks.every(c => c.ok), [checks]);
+
+  // ── Signature ─────────────────────────────────────────────────────────────
+  function canvasPoint(e, canvas) {
+    const r  = canvas.getBoundingClientRect();
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: (cx - r.left) * (canvas.width / r.width), y: (cy - r.top) * (canvas.height / r.height) };
+  }
+
+  function startDraw(e) {
+    if (e.type === "touchstart") e.preventDefault();
+    const c = sigRef.current, ctx = c.getContext("2d"), p = canvasPoint(e, c);
+    drawing.current = true;
+    ctx.lineWidth = 2.5; ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.strokeStyle = "#000";
+    ctx.beginPath(); ctx.moveTo(p.x, p.y);
+  }
+
+  function draw(e) {
+    if (!drawing.current) return;
+    if (e.type === "touchmove") e.preventDefault();
+    const c = sigRef.current, ctx = c.getContext("2d"), p = canvasPoint(e, c);
+    ctx.lineTo(p.x, p.y); ctx.stroke();
+    setHasSignature(true);
+  }
+
+  function endDraw() { drawing.current = false; }
+
+  function clearSig() {
+    const c = sigRef.current;
+    c.getContext("2d").clearRect(0, 0, c.width, c.height);
+    setHasSignature(false);
+  }
+
+  // ── Offline sync ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    async function syncOffline() {
+      const q = JSON.parse(localStorage.getItem("offlineTickets") || "[]");
+      if (!q.length) return;
+      const remaining = [];
+      for (const ticket of q) {
+        try {
+          await fetch(API_URL, {
+            method: "POST", mode: "no-cors",
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            body: JSON.stringify(ticket),
+          });
+        } catch {
+          remaining.push(ticket); // keep ones that still failed
+        }
+      }
+      if (remaining.length < q.length) {
+        remaining.length
+          ? localStorage.setItem("offlineTickets", JSON.stringify(remaining))
+          : localStorage.removeItem("offlineTickets");
+      }
+    }
+    window.addEventListener("online", syncOffline);
+    syncOffline();
+    return () => window.removeEventListener("online", syncOffline);
+  }, []);
+
+  // ── Submit ────────────────────────────────────────────────────────────────
+  const handleSubmit = useCallback(async () => {
+    if (!isComplete || isSubmitting) return;
+    setIsSubmitting(true);
+    setSubmitError("");
+
+    const payload = {
+      submissionId, phone, ...form, loads, totalBBLS,
+      signature: sigRef.current.toDataURL("image/png"),
+    };
+
+    try {
+      await fetch(API_URL, {
+        method: "POST", mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(payload),
+      });
+      onComplete();
+    } catch {
+      // Save offline
+      try {
+        const q = JSON.parse(localStorage.getItem("offlineTickets") || "[]");
+        q.push(payload);
+        localStorage.setItem("offlineTickets", JSON.stringify(q));
+        onComplete(); // still navigate away — will sync on reconnect
+      } catch {
+        setSubmitError("Submission failed. Please try again.");
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [isComplete, isSubmitting, form, loads, totalBBLS, phone, submissionId, onComplete]);
+
+  // ── Scanner handler ───────────────────────────────────────────────────────
+  const handleScanUse = useCallback(img => {
+    if (scanTarget?.type === "field") update("fieldTicketImage", img);
+    if (scanTarget?.type === "load")
+      updateLoad(scanTarget.index, "verificationImage", img);
+    setScanOpen(false);
+    setScanTarget(null);
+  }, [scanTarget, update, updateLoad]);
+
+  // ── Hours calc ────────────────────────────────────────────────────────────
+  const hoursCalc = useMemo(() => {
+    if (!form.startTime || !form.endTime) return null;
+    const [sh, sm] = form.startTime.split(":").map(Number);
+    const [eh, em] = form.endTime.split(":").map(Number);
+    let mins = (eh * 60 + em) - (sh * 60 + sm);
+    if (mins < 0) mins += 1440;
+    const hrs   = (mins / 60).toFixed(2);
+    const total = form.hourlyRate
+      ? (parseFloat(hrs) * parseFloat(form.hourlyRate)).toFixed(2)
+      : null;
+    return { hrs, total };
+  }, [form.startTime, form.endTime, form.hourlyRate]);
+
+  const dispatchLabel = DISPATCH_LABEL[form.client] ?? "DISPATCH #";
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  return (
+    <PageShell maxW={520}>
+      {/* Page header */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ color: T.gold, fontSize: 20, fontWeight: 800, letterSpacing: "0.12em" }}>
+          {editTicket ? "EDIT & RESUBMIT" : "NEW FIELD TICKET"}
+        </div>
+        <div style={{ color: T.muted, fontSize: 11, marginTop: 2 }}>
+          {editTicket ? `Editing ${submissionId}` : "Complete all required fields to submit"}
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div style={{
+        position: "sticky", top: 0, zIndex: 10,
+        background: T.card, paddingBottom: 10, paddingTop: 4,
+        marginBottom: 16,
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between",
+          fontSize: 10, color: T.muted, marginBottom: 5, letterSpacing: "0.1em" }}>
+          <span>FORM COMPLETION</span>
+          <span style={{ color: progress === 100 ? T.success : T.gold, fontWeight: 700 }}>
+            {progress}%
+          </span>
+        </div>
+        <div style={{ height: 4, background: T.surface, borderRadius: 99 }}>
+          <div style={{
+            height: "100%", borderRadius: 99,
+            background: progress === 100 ? T.success : T.gold,
+            width: `${progress}%`, transition: "width 0.3s ease",
+          }}/>
+        </div>
+      </div>
+
+      {/* ── Job Info ── */}
+      <SectionCard title="📋 JOB INFORMATION">
+        <Label text="Client Organization" required />
+        <Select value={form.client} onChange={e => update("client", e.target.value)}>
+          <option value="">Select client…</option>
+          {CLIENTS.map(c => <option key={c}>{c}</option>)}
+        </Select>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <Label text="Field Ticket #" required />
+            <Input value={form.fieldTicket} onChange={e => update("fieldTicket", e.target.value)} />
+          </div>
+          <div>
+            <Label text={dispatchLabel} required />
+            <Input value={form.dispatch} onChange={e => update("dispatch", e.target.value)} />
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <Label text="Unit / Truck #" required />
+            <Input value={form.unit} onChange={e => update("unit", e.target.value)} />
+          </div>
+          <div>
+            <Label text="Driver Name" required />
+            <Input value={form.driver} onChange={e => update("driver", e.target.value)} />
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <Label text="Work Date" required />
+            <Input type="date" value={form.workDate} onChange={e => update("workDate", e.target.value)} />
+          </div>
+          <div>
+            <Label text="Well / Lease" required />
+            <Input value={form.wellLease} onChange={e => update("wellLease", e.target.value)} />
+          </div>
+        </div>
+
+        <Label text="Notes / Description" />
+        <Textarea
+          placeholder="Add job specifics…"
+          value={form.notes}
+          onChange={e => update("notes", e.target.value)}
+        />
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 4 }}>
+          <div>
+            <Label text="Start Time" />
+            <Input type="time" value={form.startTime} onChange={e => update("startTime", e.target.value)} />
+          </div>
+          <div>
+            <Label text="End Time" />
+            <Input type="time" value={form.endTime} onChange={e => update("endTime", e.target.value)} />
+          </div>
+        </div>
+
+        <Label text="Hourly Rate ($)" />
+        <Input
+          type="number" inputMode="decimal" placeholder="e.g. 85"
+          value={form.hourlyRate} onChange={e => update("hourlyRate", e.target.value)}
+        />
+
+        {hoursCalc && (
+          <div style={{
+            marginTop: 10, padding: "10px 14px",
+            background: "rgba(212,175,55,0.07)",
+            border: "1px solid rgba(212,175,55,0.2)", borderRadius: 8,
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+          }}>
+            <div>
+              <div style={{ color: T.muted, fontSize: 10 }}>TOTAL HOURS</div>
+              <div style={{ color: T.gold, fontFamily: "monospace", fontWeight: 700, fontSize: 20 }}>
+                {hoursCalc.hrs} hrs
+              </div>
+            </div>
+            {hoursCalc.total && (
+              <div style={{ textAlign: "right" }}>
+                <div style={{ color: T.muted, fontSize: 10 }}>ESTIMATED TOTAL</div>
+                <div style={{ color: T.success, fontFamily: "monospace", fontWeight: 700, fontSize: 20 }}>
+                  ${hoursCalc.total}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </SectionCard>
+
+      {/* ── Field Ticket Photo ── */}
+      <SectionCard title="📄 FIELD TICKET PHOTO ✱">
+        <div
+          onClick={() => { setScanTarget({ type: "field" }); setScanOpen(true); }}
+          role="button" tabIndex={0}
+          onKeyDown={e => e.key === "Enter" && (setScanTarget({ type: "field" }), setScanOpen(true))}
+          aria-label="Scan or upload field ticket"
+          style={{
+            border: `1px dashed ${form.fieldTicketImage ? T.goldDim : T.border}`,
+            borderRadius: 8, cursor: "pointer", textAlign: "center",
+            background: T.bg, overflow: "hidden",
+            padding: form.fieldTicketImage ? 0 : 20, transition: "border-color 0.2s",
+          }}
+        >
+          {form.fieldTicketImage
+            ? <img src={form.fieldTicketImage} alt="Field ticket" style={{ width: "100%", borderRadius: 6 }} />
+            : <div style={{ color: T.muted, fontSize: 13 }}>📄 Tap to scan or upload ticket photo</div>
+          }
+        </div>
+        {form.fieldTicketImage && (
+          <button onClick={() => update("fieldTicketImage", "")} style={{
+            marginTop: 6, background: "transparent", border: "none",
+            color: T.danger, fontSize: 11, cursor: "pointer",
+          }}>
+            ✕ Remove photo
+          </button>
+        )}
+      </SectionCard>
+
+      {/* ── Load Manifest ── */}
+      <SectionCard
+        title="🚛 LOAD MANIFEST"
+        right={
+          <div style={{
+            background: "rgba(212,175,55,0.1)", border: `1px solid ${T.goldDim}`,
+            borderRadius: 8, padding: "4px 12px", color: T.gold,
+            fontFamily: "monospace", fontSize: 13, fontWeight: 700,
+          }}>
+            {totalBBLS.toFixed(2)} BBL
+          </div>
+        }
+      >
+        {loads.map((load, idx) => (
+          <LoadCard
+            key={load.id}
+            load={load}
+            index={idx}
+            isExxon={isExxon}
+            canDelete={loads.length > 1}
+            onUpdate={(k, v) => updateLoad(idx, k, v)}
+            onDelete={() => deleteLoad(idx)}
+            onScan={() => { setScanTarget({ type: "load", index: idx }); setScanOpen(true); }}
+          />
+        ))}
+        <button
+          onClick={addLoad}
+          style={{
+            width: "100%", padding: 12, border: `1px dashed ${T.border}`,
+            borderRadius: 8, cursor: "pointer", background: "transparent",
+            color: T.muted, fontSize: 13, transition: "all 0.15s",
+          }}
+          onMouseEnter={e => { e.currentTarget.style.borderColor = T.borderHi; e.currentTarget.style.color = T.text; }}
+          onMouseLeave={e => { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.muted; }}
+        >
+          + ADD ADDITIONAL LOAD
+        </button>
+      </SectionCard>
+
+      {/* ── Signature ── */}
+      <SectionCard
+        title="✍ OPERATOR SIGNATURE ✱"
+        right={hasSignature
+          ? <button onClick={clearSig} style={{ background: "transparent", border: "none",
+              color: T.danger, fontSize: 12, cursor: "pointer" }}>✕ Clear</button>
+          : null
+        }
+      >
+        <div style={{ borderRadius: 8, overflow: "hidden", border: `1px solid ${T.border}` }}>
+          <canvas
+            ref={sigRef}
+            width={900} height={280}
+            style={{ width: "100%", height: 140, background: "#fff", display: "block", touchAction: "none" }}
+            onMouseDown={startDraw} onMouseMove={draw} onMouseUp={endDraw} onMouseLeave={endDraw}
+            onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={endDraw}
+            aria-label="Signature pad"
+          />
+        </div>
+        {!hasSignature && (
+          <div style={{ color: T.muted, fontSize: 11, textAlign: "center", marginTop: 6 }}>
+            Sign above with your finger or mouse
+          </div>
+        )}
+      </SectionCard>
+
+      {/* ── Volume Summary ── */}
+      <SectionCard>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ color: T.muted, fontSize: 10 }}>TOTAL LOADS</div>
+            <div style={{ color: T.text, fontWeight: 700, fontSize: 20, marginTop: 2 }}>
+              {loads.length}
+            </div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ color: T.muted, fontSize: 10 }}>TOTAL VOLUME</div>
+            <div style={{
+              color: T.gold, fontFamily: "monospace", fontWeight: 800, fontSize: 28, marginTop: 2,
+            }}>
+              {totalBBLS.toFixed(2)} <span style={{ fontSize: 14 }}>BBL</span>
+            </div>
+          </div>
+        </div>
+      </SectionCard>
+
+      <ErrorMsg msg={submitError} />
+
+      <GoldBtn disabled={!isComplete} loading={isSubmitting} onClick={handleSubmit}
+        style={{ marginTop: 4 }}>
+        {isSubmitting ? "SUBMITTING…"
+          : isComplete  ? "✓ SUBMIT FINAL TICKET"
+          : `COMPLETE FORM — ${progress}%`}
+      </GoldBtn>
+
+      <ScannerModal
+        open={scanOpen}
+        onClose={() => { setScanOpen(false); setScanTarget(null); }}
+        onUse={handleScanUse}
+      />
+    </PageShell>
+  );
+}
