@@ -494,7 +494,9 @@ function TicketSuccess({ onBack }) {
   );
 }
 
-// ─── DOCUMENT SCANNER — Mobile-First v4 ─────────────────────────────────────
+// ─── DOCUMENT SCANNER — Mobile-First v5 ─────────────────────────────────────
+// Key fix: canvas always fills full screen width. Adjust stage zooms into
+// detected document region. Pinch-to-zoom on adjust canvas.
 function ScannerModal({ open, onClose, onUse }) {
   const [stage,      setStage]      = useState("capture");
   const [docFound,   setDocFound]   = useState(false);
@@ -508,23 +510,28 @@ function ScannerModal({ open, onClose, onUse }) {
   const [camErr,     setCamErr]     = useState(false);
   const [liveC,      setLiveC]      = useState(null);
   const [outSize,    setOutSize]    = useState({w:0,h:0});
+  // zoom/pan state for adjust stage
+  const [zoom,       setZoom]       = useState(1);
+  const [pan,        setPan]        = useState({x:0,y:0});
 
   const vidRef    = useRef(null);
   const streamRef = useRef(null);
   const capCanv   = useRef(null);
   const adjCanv   = useRef(null);
+  const adjWrap   = useRef(null);  // scrollable wrapper around canvas
   const outCanv   = useRef(null);
   const fileRef   = useRef(null);
   const imgRef    = useRef(null);
-  const dragR     = useRef(null);
+  const dragR     = useRef(null);  // corner drag index
   const loopR     = useRef(null);
   const stableR   = useRef(0);
   const prevPts   = useRef(null);
   const autoR     = useRef(true);
   const cornersR  = useRef(null);
+  // pinch state
+  const pinchRef  = useRef(null);
   autoR.current   = autoSnap;
 
-  // ── open/close lifecycle
   useEffect(() => {
     if (!open) return;
     reset(); boot();
@@ -535,6 +542,7 @@ function ScannerModal({ open, onClose, onUse }) {
     setStage("capture"); setDocFound(false); setCorners(null);
     setLiveC(null); setFilter("document"); setFinalImage(null);
     setProcessing(false); setCamReady(false); setCamErr(false);
+    setZoom(1); setPan({x:0,y:0});
     stableR.current=0; prevPts.current=null; dragR.current=null; cornersR.current=null;
   }
 
@@ -543,79 +551,84 @@ function ScannerModal({ open, onClose, onUse }) {
       const stream = await navigator.mediaDevices.getUserMedia({
         video:{facingMode:{ideal:"environment"},width:{ideal:1920,min:640},height:{ideal:1440,min:480}}
       });
-      streamRef.current=stream;
-      if (vidRef.current){vidRef.current.srcObject=stream; await vidRef.current.play();}
+      streamRef.current = stream;
+      if (vidRef.current) { vidRef.current.srcObject=stream; await vidRef.current.play(); }
       setCamReady(true);
     } catch { setCamErr(true); }
   }
 
   function killAll() {
-    if(loopR.current){cancelAnimationFrame(loopR.current);loopR.current=null;}
-    if(streamRef.current){streamRef.current.getTracks().forEach(t=>t.stop());streamRef.current=null;}
+    if (loopR.current) { cancelAnimationFrame(loopR.current); loopR.current=null; }
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t=>t.stop()); streamRef.current=null; }
   }
 
-  // ── detection loop
-  const lastT=useRef(0);
+  // ── detection loop (throttled 220ms)
+  const lastT = useRef(0);
   useEffect(()=>{
-    if(!camReady||stage!=="capture")return;
-    const tick=()=>{
-      const now=Date.now();
-      if(now-lastT.current>220){lastT.current=now;runDetect();}
-      loopR.current=requestAnimationFrame(tick);
+    if (!camReady || stage!=="capture") return;
+    const tick = () => {
+      const now = Date.now();
+      if (now - lastT.current > 220) { lastT.current=now; runDetect(); }
+      loopR.current = requestAnimationFrame(tick);
     };
-    loopR.current=requestAnimationFrame(tick);
-    return ()=>{if(loopR.current)cancelAnimationFrame(loopR.current);};
+    loopR.current = requestAnimationFrame(tick);
+    return ()=>{ if(loopR.current) cancelAnimationFrame(loopR.current); };
   },[camReady,stage]);
 
-  function runDetect(){
-    const v=vidRef.current; if(!v||v.readyState<2||!v.videoWidth)return;
-    const W=320,H=Math.round(320*v.videoHeight/Math.max(v.videoWidth,1));
-    const c=document.createElement("canvas");c.width=W;c.height=H;
+  function runDetect() {
+    const v=vidRef.current; if(!v||v.readyState<2||!v.videoWidth) return;
+    const W=320, H=Math.round(320*v.videoHeight/Math.max(v.videoWidth,1));
+    const c=document.createElement("canvas"); c.width=W; c.height=H;
     c.getContext("2d").drawImage(v,0,0,W,H);
     const found=sobelFind(c.getContext("2d"),W,H);
-    if(found){
-      setLiveC(found);setDocFound(true);
-      if(autoR.current&&prevPts.current){
+    if (found) {
+      setLiveC(found); setDocFound(true);
+      if (autoR.current && prevPts.current) {
         const moved=found.reduce((s,p,i)=>s+Math.hypot(p.x-prevPts.current[i].x,p.y-prevPts.current[i].y),0);
-        if(moved<0.022){
-          stableR.current++;setStableCnt(stableR.current);
-          if(stableR.current>=5){snap();return;}
-        } else {stableR.current=0;setStableCnt(0);}
+        if (moved<0.022) {
+          stableR.current++; setStableCnt(stableR.current);
+          if (stableR.current>=5) { snap(); return; }
+        } else { stableR.current=0; setStableCnt(0); }
       }
       prevPts.current=found;
     } else {
-      setDocFound(false);setLiveC(null);
-      stableR.current=0;setStableCnt(0);prevPts.current=null;
+      setDocFound(false); setLiveC(null);
+      stableR.current=0; setStableCnt(0); prevPts.current=null;
     }
   }
 
-  function sobelFind(ctx,W,H){
+  function sobelFind(ctx,W,H) {
     const px=ctx.getImageData(0,0,W,H).data;
     const g=new Float32Array(W*H);
-    for(let i=0;i<W*H;i++)g[i]=0.299*px[i*4]+0.587*px[i*4+1]+0.114*px[i*4+2];
-    const e=new Float32Array(W*H);let mx=0;
-    for(let y=1;y<H-1;y++)for(let x=1;x<W-1;x++){
+    for(let i=0;i<W*H;i++) g[i]=0.299*px[i*4]+0.587*px[i*4+1]+0.114*px[i*4+2];
+    const e=new Float32Array(W*H); let mx=0;
+    for(let y=1;y<H-1;y++) for(let x=1;x<W-1;x++){
       const gx=-g[(y-1)*W+(x-1)]-2*g[y*W+(x-1)]-g[(y+1)*W+(x-1)]+g[(y-1)*W+(x+1)]+2*g[y*W+(x+1)]+g[(y+1)*W+(x+1)];
       const gy=-g[(y-1)*W+(x-1)]-2*g[(y-1)*W+x]-g[(y-1)*W+(x+1)]+g[(y+1)*W+(x-1)]+2*g[(y+1)*W+x]+g[(y+1)*W+(x+1)];
-      const v=Math.sqrt(gx*gx+gy*gy);e[y*W+x]=v;if(v>mx)mx=v;
+      const v=Math.sqrt(gx*gx+gy*gy); e[y*W+x]=v; if(v>mx)mx=v;
     }
     if(mx<8)return null;
-    const th=mx*0.22;let x0=W,x1=0,y0=H,y1=0,ok=false;
-    for(let y=0;y<H;y++)for(let x=0;x<W;x++)if(e[y*W+x]>th){if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;ok=true;}
+    const th=mx*0.22; let x0=W,x1=0,y0=H,y1=0,ok=false;
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++) if(e[y*W+x]>th){if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;ok=true;}
     if(!ok||(x1-x0)/W<0.25||(y1-y0)/H<0.25)return null;
     const p=0.01;
-    return [{x:Math.max(0,x0/W-p),y:Math.max(0,y0/H-p)},{x:Math.min(1,x1/W+p),y:Math.max(0,y0/H-p)},{x:Math.min(1,x1/W+p),y:Math.min(1,y1/H+p)},{x:Math.max(0,x0/W-p),y:Math.min(1,y1/H+p)}];
+    return [
+      {x:Math.max(0,x0/W-p),y:Math.max(0,y0/H-p)},
+      {x:Math.min(1,x1/W+p),y:Math.max(0,y0/H-p)},
+      {x:Math.min(1,x1/W+p),y:Math.min(1,y1/H+p)},
+      {x:Math.max(0,x0/W-p),y:Math.min(1,y1/H+p)},
+    ];
   }
 
   function defCorners(){const p=0.07;return [{x:p,y:p},{x:1-p,y:p},{x:1-p,y:1-p},{x:p,y:1-p}];}
 
-  function snap(){
+  function snap() {
     if(loopR.current){cancelAnimationFrame(loopR.current);loopR.current=null;}
-    const v=vidRef.current;if(!v)return;
+    const v=vidRef.current; if(!v)return;
     const c=capCanv.current;
-    c.width=v.videoWidth;c.height=v.videoHeight;
+    c.width=v.videoWidth; c.height=v.videoHeight;
     c.getContext("2d").drawImage(v,0,0);
-    setProcessing(true);killAll();
+    setProcessing(true); killAll();
     const img=new Image();
     img.onload=()=>{
       imgRef.current=img;
@@ -624,106 +637,179 @@ function ScannerModal({ open, onClose, onUse }) {
       const tc=document.createElement("canvas");tc.width=tw;tc.height=th;
       tc.getContext("2d").drawImage(img,0,0,tw,th);
       const det=sobelFind(tc.getContext("2d"),tw,th)||defCorners();
-      cornersR.current=det;setCorners(det);setProcessing(false);setStage("adjust");
+      cornersR.current=det; setCorners(det);
+      setProcessing(false); setStage("adjust");
     };
     img.src=c.toDataURL("image/jpeg",0.96);
   }
 
-  function handleFile(e){
-    const f=e.target.files[0];if(!f)return;
-    killAll();setProcessing(true);
+  function handleFile(e) {
+    const f=e.target.files[0]; if(!f)return;
+    killAll(); setProcessing(true);
     const r=new FileReader();
     r.onload=ev=>{
       const img=new Image();
       img.onload=()=>{
         imgRef.current=img;
-        capCanv.current.width=img.width;capCanv.current.height=img.height;
+        capCanv.current.width=img.width; capCanv.current.height=img.height;
         capCanv.current.getContext("2d").drawImage(img,0,0);
         const S=800,sc=Math.min(1,S/Math.max(img.width,img.height));
         const tw=Math.round(img.width*sc),th=Math.round(img.height*sc);
         const tc=document.createElement("canvas");tc.width=tw;tc.height=th;
         tc.getContext("2d").drawImage(img,0,0,tw,th);
         const det=sobelFind(tc.getContext("2d"),tw,th)||defCorners();
-        cornersR.current=det;setCorners(det);setProcessing(false);setStage("adjust");
+        cornersR.current=det; setCorners(det);
+        setProcessing(false); setStage("adjust");
       };
       img.src=ev.target.result;
     };
-    r.readAsDataURL(f);e.target.value="";
+    r.readAsDataURL(f); e.target.value="";
   }
 
-  // ── draw adjustment canvas — fills parent width
+  // ── Draw adjustment canvas: ALWAYS fills full screen width
+  // Zoom is done via CSS transform on the canvas element — keeps canvas
+  // resolution high and handles crisp on retina
   useEffect(()=>{
     if(stage!=="adjust"||!corners||!adjCanv.current||!imgRef.current)return;
     cornersR.current=corners;
-    drawAdj(corners);
+    initAdjCanvas();
   },[stage,corners]);
 
-  function drawAdj(C){
-    const canvas=adjCanv.current,img=imgRef.current;if(!canvas||!img)return;
-    const par=canvas.parentElement;
-    const maxW=(par?.clientWidth||window.innerWidth)-0;
-    const maxH=window.innerHeight*0.62;
-    const sc=Math.min(maxW/img.width,maxH/img.height,1);
-    canvas.width=Math.round(img.width*sc);
-    canvas.height=Math.round(img.height*sc);
+  function initAdjCanvas() {
+    const canvas=adjCanv.current, img=imgRef.current;
+    if(!canvas||!img)return;
+
+    // Canvas fills full screen width, maintains aspect ratio
+    const sw = window.innerWidth;
+    const sh = Math.round(sw * img.height / img.width);
+    canvas.width  = sw;
+    canvas.height = sh;
+    // Override CSS size to match exactly
+    canvas.style.width  = sw + "px";
+    canvas.style.height = sh + "px";
+
+    drawAdjFrame(cornersR.current);
+
+    // Auto-zoom: compute scale so detected doc fills ~85% of screen height
+    const docH = (cornersR.current[2].y - cornersR.current[0].y) * sh;
+    const targetH = window.innerHeight * 0.82;
+    const autoZ = Math.min(2.5, Math.max(1.0, targetH / Math.max(docH, 80)));
+    setZoom(autoZ);
+
+    // Auto-pan: center the detected doc vertically
+    const docCY = ((cornersR.current[0].y + cornersR.current[2].y) / 2) * sh;
+    const screenCY = window.innerHeight / 2;
+    const offsetY = screenCY - docCY * autoZ;
+    setPan({x:0, y:offsetY});
+  }
+
+  function drawAdjFrame(C) {
+    const canvas=adjCanv.current, img=imgRef.current; if(!canvas||!img)return;
+    const W=canvas.width, H=canvas.height;
     const ctx=canvas.getContext("2d");
-    const W=canvas.width,H=canvas.height;
+    ctx.clearRect(0,0,W,H);
     ctx.drawImage(img,0,0,W,H);
     const pts=C.map(c=>({x:c.x*W,y:c.y*H}));
-    // dim outside
-    ctx.fillStyle="rgba(0,0,0,0.58)";ctx.fillRect(0,0,W,H);
-    // clear inside
-    ctx.save();ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);
-    pts.forEach(p=>ctx.lineTo(p.x,p.y));ctx.closePath();
-    ctx.globalCompositeOperation="destination-out";ctx.fill();ctx.restore();
-    // redraw image inside
-    ctx.save();ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);
-    pts.forEach(p=>ctx.lineTo(p.x,p.y));ctx.closePath();
-    ctx.clip();ctx.drawImage(img,0,0,W,H);ctx.restore();
-    // glowing border
-    ctx.save();ctx.shadowColor="#D4AF37";ctx.shadowBlur=12;
-    ctx.strokeStyle="#D4AF37";ctx.lineWidth=2.5;
-    ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);
-    pts.forEach(p=>ctx.lineTo(p.x,p.y));ctx.closePath();ctx.stroke();ctx.restore();
-    // handles — 44px touch target
+
+    // Darken outside selection
+    ctx.fillStyle="rgba(0,0,0,0.55)";
+    ctx.fillRect(0,0,W,H);
+    // Cut out inside
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y);
+    pts.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.closePath();
+    ctx.globalCompositeOperation="destination-out"; ctx.fill(); ctx.restore();
+    // Redraw image inside
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y);
+    pts.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.closePath();
+    ctx.clip(); ctx.drawImage(img,0,0,W,H); ctx.restore();
+    // Glowing gold border
+    ctx.save();
+    ctx.shadowColor="#D4AF37"; ctx.shadowBlur=14;
+    ctx.strokeStyle="#D4AF37"; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y);
+    pts.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.closePath(); ctx.stroke();
+    ctx.restore();
+    // Corner handles: 56px outer touch zone, 22px visible circle
     pts.forEach((p,i)=>{
-      ctx.beginPath();ctx.arc(p.x,p.y,28,0,Math.PI*2);
-      ctx.fillStyle="rgba(212,175,55,0.15)";ctx.fill();
-      ctx.beginPath();ctx.arc(p.x,p.y,18,0,Math.PI*2);
+      // outer touch-zone ring (semi-transparent)
+      ctx.beginPath(); ctx.arc(p.x,p.y,32,0,Math.PI*2);
+      ctx.fillStyle="rgba(212,175,55,0.12)"; ctx.fill();
+      // visible circle with glow
+      ctx.save();
+      ctx.shadowColor="rgba(0,0,0,0.7)"; ctx.shadowBlur=10;
+      ctx.beginPath(); ctx.arc(p.x,p.y,22,0,Math.PI*2);
       ctx.fillStyle=dragR.current===i?"#ffffff":"#D4AF37";
-      ctx.shadowColor="rgba(0,0,0,0.6)";ctx.shadowBlur=8;ctx.fill();ctx.shadowBlur=0;
-      ctx.strokeStyle="rgba(0,0,0,0.5)";ctx.lineWidth=2;ctx.stroke();
-      ctx.strokeStyle=dragR.current===i?"#444":"rgba(0,0,0,0.7)";ctx.lineWidth=2.5;
-      ctx.beginPath();ctx.moveTo(p.x-9,p.y);ctx.lineTo(p.x+9,p.y);ctx.stroke();
-      ctx.beginPath();ctx.moveTo(p.x,p.y-9);ctx.lineTo(p.x,p.y+9);ctx.stroke();
+      ctx.fill(); ctx.restore();
+      ctx.strokeStyle="rgba(0,0,0,0.5)"; ctx.lineWidth=2.5; ctx.stroke();
+      // crosshair
+      ctx.strokeStyle=dragR.current===i?"#333":"rgba(0,0,0,0.65)";
+      ctx.lineWidth=2.5;
+      ctx.beginPath(); ctx.moveTo(p.x-11,p.y); ctx.lineTo(p.x+11,p.y); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(p.x,p.y-11); ctx.lineTo(p.x,p.y+11); ctx.stroke();
     });
   }
 
-  function getXY(e){
-    const c=adjCanv.current,r=c.getBoundingClientRect();
-    const sx=c.width/r.width,sy=c.height/r.height;
-    const s=e.touches?e.touches[0]:e;
-    return{x:(s.clientX-r.left)*sx,y:(s.clientY-r.top)*sy};
+  // ── pointer events — corrected for zoom/pan transform
+  function getCanvasXY(e) {
+    const canvas=adjCanv.current; if(!canvas)return{x:0,y:0};
+    const rect=canvas.getBoundingClientRect();
+    // getBoundingClientRect already accounts for CSS transform
+    const src=e.touches?e.touches[0]:e;
+    // map from screen coords into canvas coords
+    const scaleX=canvas.width/rect.width;
+    const scaleY=canvas.height/rect.height;
+    return {
+      x:(src.clientX-rect.left)*scaleX,
+      y:(src.clientY-rect.top)*scaleY,
+    };
   }
-  function onDown(e){
+
+  function onDown(e) {
+    if(e.touches&&e.touches.length===2){ startPinch(e); return; }
     e.preventDefault();
-    const{x,y}=getXY(e),c=adjCanv.current;
-    const pts=cornersR.current.map(p=>({x:p.x*c.width,y:p.y*c.height}));
-    const hit=pts.findIndex(p=>Math.hypot(p.x-x,p.y-y)<36);
-    if(hit!==-1)dragR.current=hit;
+    const{x,y}=getCanvasXY(e), canvas=adjCanv.current;
+    const pts=cornersR.current.map(p=>({x:p.x*canvas.width,y:p.y*canvas.height}));
+    // Hit radius 40px in canvas space (scaled up by zoom so actually easier on screen)
+    const hit=pts.findIndex(p=>Math.hypot(p.x-x,p.y-y)<40);
+    if(hit!==-1) dragR.current=hit;
   }
-  function onMove(e){
+
+  function onMove(e) {
+    if(e.touches&&e.touches.length===2){ movePinch(e); return; }
     if(dragR.current===null||dragR.current===undefined)return;
     e.preventDefault();
-    const{x,y}=getXY(e),c=adjCanv.current;
+    const{x,y}=getCanvasXY(e), canvas=adjCanv.current;
     const newC=cornersR.current.map((p,i)=>i===dragR.current
-      ?{x:Math.max(0.01,Math.min(0.99,x/c.width)),y:Math.max(0.01,Math.min(0.99,y/c.height))}:p);
-    cornersR.current=newC;setCorners([...newC]);drawAdj(newC);
+      ?{x:Math.max(0.01,Math.min(0.99,x/canvas.width)),y:Math.max(0.01,Math.min(0.99,y/canvas.height))}:p);
+    cornersR.current=newC; setCorners([...newC]); drawAdjFrame(newC);
   }
-  function onUp(){dragR.current=null;}
+
+  function onUp(e) {
+    if(e&&e.touches&&e.touches.length===0) pinchRef.current=null;
+    dragR.current=null;
+  }
+
+  // ── pinch-to-zoom
+  function startPinch(e) {
+    const t=e.touches;
+    pinchRef.current={
+      dist: Math.hypot(t[0].clientX-t[1].clientX,t[0].clientY-t[1].clientY),
+      zoom,
+    };
+  }
+  function movePinch(e) {
+    if(!pinchRef.current)return;
+    e.preventDefault();
+    const t=e.touches;
+    const newDist=Math.hypot(t[0].clientX-t[1].clientX,t[0].clientY-t[1].clientY);
+    const newZoom=Math.max(1,Math.min(4,pinchRef.current.zoom*(newDist/pinchRef.current.dist)));
+    setZoom(newZoom);
+  }
 
   // ── warp + enhance
-  function processDoc(f){
+  function processDoc(f) {
     setProcessing(true);
     const C=cornersR.current||corners;
     setTimeout(()=>{
@@ -735,26 +821,21 @@ function ScannerModal({ open, onClose, onUse }) {
         const hL=Math.hypot(pts[3].x-pts[0].x,pts[3].y-pts[0].y);
         const hR=Math.hypot(pts[2].x-pts[1].x,pts[2].y-pts[1].y);
         const rawW=Math.max(wT,wB),rawH=Math.max(hL,hR);
-        // Scale up for clarity but cap for mobile perf
         const SC=Math.min(2.2,2600/Math.max(rawW,rawH));
         const outW=Math.round(rawW*SC),outH=Math.round(rawH*SC);
-
         const srcC=document.createElement("canvas");srcC.width=IW;srcC.height=IH;
         srcC.getContext("2d").drawImage(img,0,0);
         const srcPx=srcC.getContext("2d").getImageData(0,0,IW,IH).data;
-
         const dstC=outCanv.current;dstC.width=outW;dstC.height=outH;
         const dstCtx=dstC.getContext("2d");
         const dstId=dstCtx.createImageData(outW,outH);const d=dstId.data;
-
         for(let dy=0;dy<outH;dy++){
           const v=dy/outH;
           for(let dx=0;dx<outW;dx++){
             const u=dx/outW;
             const sx=(1-u)*(1-v)*pts[0].x+u*(1-v)*pts[1].x+u*v*pts[2].x+(1-u)*v*pts[3].x;
             const sy=(1-u)*(1-v)*pts[0].y+u*(1-v)*pts[1].y+u*v*pts[2].y+(1-u)*v*pts[3].y;
-            const x0=Math.floor(sx),y0=Math.floor(sy);
-            const x1=Math.min(x0+1,IW-1),y1=Math.min(y0+1,IH-1);
+            const x0=Math.floor(sx),y0=Math.floor(sy),x1=Math.min(x0+1,IW-1),y1=Math.min(y0+1,IH-1);
             const fx=sx-x0,fy=sy-y0,di=(dy*outW+dx)*4;
             for(let ch=0;ch<3;ch++){
               const tl=srcPx[(y0*IW+x0)*4+ch],tr=srcPx[(y0*IW+x1)*4+ch];
@@ -773,67 +854,44 @@ function ScannerModal({ open, onClose, onUse }) {
     },30);
   }
 
-  // ── ENHANCEMENT PIPELINE — calibrated to not blow out text
   function enhance(ctx,W,H,mode){
     if(mode==="original")return;
     const id=ctx.getImageData(0,0,W,H);const d=id.data;
-
-    // ── Measure actual paper brightness by sampling a center strip
-    // (not corners — corners are often dark background)
     let bgSum=0,bgN=0;
     const cx=Math.round(W/2),cy=Math.round(H/2);
-    const sw=Math.round(W*0.3),sh=Math.round(H*0.3);
-    for(let y=cy-sh;y<cy+sh;y+=3)for(let x=cx-sw;x<cx+sw;x+=3){
-      const i=(y*W+x)*4;
-      const lum=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
-      if(lum>100){bgSum+=lum;bgN++;} // only count bright pixels (paper, not text)
+    const sw2=Math.round(W*0.3),sh2=Math.round(H*0.3);
+    for(let y=cy-sh2;y<cy+sh2;y+=3)for(let x=cx-sw2;x<cx+sw2;x+=3){
+      const i=(y*W+x)*4;const lum=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+      if(lum>100){bgSum+=lum;bgN++;}
     }
     const paperLum=bgN>20?bgSum/bgN:185;
-    // Gentle boost — only if paper is dark, max 1.3x to prevent blowout
     const boost=paperLum<220?Math.min(1.30,215/Math.max(paperLum,80)):1.0;
-
     for(let i=0;i<d.length;i+=4){
       let r=d[i],g=d[i+1],b=d[i+2];
-
       if(mode==="document"){
-        // Brighten paper gently
         r=Math.min(255,r*boost);g=Math.min(255,g*boost);b=Math.min(255,b*boost);
         const lum=0.299*r+0.587*g+0.114*b;
-        // Adaptive S-curve: darks go darker (text), lights go lighter (paper)
-        // Key: text pixels (lum<100) get darker, paper pixels (lum>160) get whiter
-        const curve = lum<80  ? lum*0.60             // very dark → black text
-                    : lum<140 ? 48+(lum-80)*0.85     // mid-dark → grey areas
-                    : lum<200 ? 99+(lum-140)*1.35    // light → bright paper
-                              : Math.min(255,180+(lum-200)*2.5); // very light → white
+        const curve=lum<80?lum*0.60:lum<140?48+(lum-80)*0.85:lum<200?99+(lum-140)*1.35:Math.min(255,180+(lum-200)*2.5);
         const ratio=lum>0?curve/lum:1;
-        r=Math.min(255,Math.max(0,r*ratio));
-        g=Math.min(255,Math.max(0,g*ratio));
-        b=Math.min(255,Math.max(0,b*ratio));
-        // Reduce saturation so paper is neutral white not yellowish
+        r=Math.min(255,Math.max(0,r*ratio));g=Math.min(255,Math.max(0,g*ratio));b=Math.min(255,Math.max(0,b*ratio));
         const fl=0.299*r+0.587*g+0.114*b;
-        d[i]  =Math.round(r*0.25+fl*0.75);
-        d[i+1]=Math.round(g*0.25+fl*0.75);
-        d[i+2]=Math.round(b*0.25+fl*0.75);
-      } else if(mode==="bw"){
-        const lum=0.299*r+0.587*g+0.114*b;
-        let v=lum*boost;
-        // S-curve: crisp black & white
+        d[i]=Math.round(r*0.25+fl*0.75);d[i+1]=Math.round(g*0.25+fl*0.75);d[i+2]=Math.round(b*0.25+fl*0.75);
+      }else if(mode==="bw"){
+        const lum=0.299*r+0.587*g+0.114*b;let v=lum*boost;
         v=v<70?Math.max(0,v*0.5):v<150?35+(v-70)*1.1:Math.min(255,112+(v-150)*1.8);
         d[i]=d[i+1]=d[i+2]=Math.round(Math.min(255,v));
-      } else if(mode==="highcontrast"){
-        const lum=0.299*r+0.587*g+0.114*b;
-        let v=lum*boost;
+      }else if(mode==="highcontrast"){
+        const lum=0.299*r+0.587*g+0.114*b;let v=lum*boost;
         v=v<90?Math.max(0,v*0.40):v<160?36+(v-90)*1.4:Math.min(255,134+(v-160)*2.0);
         d[i]=d[i+1]=d[i+2]=Math.round(Math.min(255,v));
-      } else if(mode==="sharp"){
+      }else if(mode==="sharp"){
         r=Math.min(255,r*boost);g=Math.min(255,g*boost);b=Math.min(255,b*boost);
-        d[i]  =Math.min(255,Math.max(0,(r-128)*1.45+133));
+        d[i]=Math.min(255,Math.max(0,(r-128)*1.45+133));
         d[i+1]=Math.min(255,Math.max(0,(g-128)*1.45+133));
         d[i+2]=Math.min(255,Math.max(0,(b-128)*1.35+128));
       }
     }
     ctx.putImageData(id,0,0);
-    // Unsharp mask — strength calibrated per mode
     const str=mode==="highcontrast"?2.0:mode==="sharp"?2.5:1.6;
     unsharp(ctx,W,H,str);
   }
@@ -841,8 +899,7 @@ function ScannerModal({ open, onClose, onUse }) {
   function unsharp(ctx,W,H,s){
     const id=ctx.getImageData(0,0,W,H);const d=id.data;
     const bl=boxBlur(new Uint8ClampedArray(d),W,H,2);
-    for(let i=0;i<d.length;i+=4)
-      for(let c=0;c<3;c++)d[i+c]=Math.min(255,Math.max(0,d[i+c]*(1+s)-bl[i+c]*s));
+    for(let i=0;i<d.length;i+=4)for(let c=0;c<3;c++)d[i+c]=Math.min(255,Math.max(0,d[i+c]*(1+s)-bl[i+c]*s));
     ctx.putImageData(id,0,0);
   }
   function boxBlur(src,W,H,r){
@@ -859,81 +916,55 @@ function ScannerModal({ open, onClose, onUse }) {
   const FILTERS=[
     {id:"document",    icon:"📄",label:"Document",    desc:"White + sharp"},
     {id:"bw",          icon:"◑", label:"B&W",         desc:"Clean mono"},
-    {id:"highcontrast",icon:"◆", label:"Hi-Contrast",  desc:"Max legibility"},
+    {id:"highcontrast",icon:"◆", label:"Hi-Contrast", desc:"Max legibility"},
     {id:"sharp",       icon:"🔍",label:"Sharpened",   desc:"Text focus"},
     {id:"original",    icon:"⬜",label:"Original",    desc:"No filter"},
   ];
 
-  // ── shared header
-  const Hdr = ({title,sub}) => (
-    <div style={{flexShrink:0,display:"flex",alignItems:"center",justifyContent:"space-between",
-      padding:"13px 16px",background:T.card,borderBottom:`1px solid ${T.border}`}}>
-      <div>
-        <div style={{color:T.gold,fontSize:14,fontWeight:700,letterSpacing:"0.12em"}}>{title}</div>
-        <div style={{color:T.muted,fontSize:10,marginTop:1}}>{sub}</div>
-      </div>
-      <button onClick={onClose} style={{
-        background:"transparent",border:`1px solid ${T.border}`,color:T.muted,
-        borderRadius:10,padding:"7px 14px",cursor:"pointer",fontSize:12,fontWeight:600,
-      }}>✕ CANCEL</button>
-    </div>
-  );
-
   return (
     <div style={{
-      position:"fixed",inset:0,background:"#000",
+      position:"fixed",inset:0,
+      background:"#000",
       display:"flex",flexDirection:"column",
       zIndex:9999,overflow:"hidden",
       fontFamily:"'Rajdhani','Inter',sans-serif",
-      // iOS safe area
-      paddingBottom:"env(safe-area-inset-bottom)",
+      height:"100dvh",  // dynamic viewport height — handles iOS chrome bar
     }}>
 
-      {/* ══ STAGE 1: CAMERA ══ */}
+      {/* ══ STAGE 1: CAMERA — full screen video ══ */}
       {stage==="capture"&&(
         <>
-          {/* Camera fills everything except bottom bar */}
-          <div style={{flex:"1 1 0",position:"relative",overflow:"hidden",background:"#000",minHeight:0}}>
+          {/* video fills everything */}
+          <div style={{flex:"1 1 0",minHeight:0,position:"relative",overflow:"hidden",background:"#000"}}>
             <video ref={vidRef} playsInline autoPlay muted
               style={{
-                // ← THE KEY FIX: absolute fill so video covers the entire div
                 position:"absolute",inset:0,
                 width:"100%",height:"100%",
                 objectFit:"cover",
+                display:camErr?"none":"block",
               }}/>
 
-            {/* Live detection overlay */}
+            {/* Live SVG overlay */}
             {!camErr&&(
               <svg style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none"}}>
-                {!liveC&&(
-                  // Guide brackets when nothing detected
-                  <>
-                    {[[6,10],[94,10],[94,90],[6,90]].map(([cx,cy],i)=>{
-                      const lx=cx<50?1:-1,ly=cy<50?1:-1,len=5;
-                      return(
-                        <g key={i} stroke="rgba(212,175,55,0.65)" strokeWidth="3.5" strokeLinecap="round">
-                          <line x1={cx+"%"} y1={cy+"%"} x2={(cx+lx*len)+"%"} y2={cy+"%"}/>
-                          <line x1={cx+"%"} y1={cy+"%"} x2={cx+"%"} y2={(cy+ly*len)+"%"}/>
-                        </g>
-                      );
-                    })}
-                  </>
-                )}
+                {!liveC&&[
+                  [6,10],[94,10],[94,90],[6,90]
+                ].map(([cx,cy],i)=>{
+                  const lx=cx<50?1:-1,ly=cy<50?1:-1,len=5;
+                  return(
+                    <g key={i} stroke="rgba(212,175,55,0.7)" strokeWidth="3.5" strokeLinecap="round">
+                      <line x1={cx+"%"} y1={cy+"%"} x2={(cx+lx*len)+"%"} y2={cy+"%"}/>
+                      <line x1={cx+"%"} y1={cy+"%"} x2={cx+"%"} y2={(cy+ly*len)+"%"}/>
+                    </g>
+                  );
+                })}
                 {liveC&&(()=>{
                   const pts=liveC.map(c=>`${(c.x*100).toFixed(1)}%,${(c.y*100).toFixed(1)}%`).join(" ");
                   return(
                     <>
-                      <defs>
-                        <filter id="glow2">
-                          <feGaussianBlur stdDeviation="3" result="b"/>
-                          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-                        </filter>
-                      </defs>
-                      <polygon points={pts} fill="rgba(34,197,94,0.06)"
-                        stroke="#22c55e" strokeWidth="2.5" filter="url(#glow2)"/>
-                      {liveC.map((c,i)=>(
-                        <circle key={i} cx={(c.x*100)+"%"} cy={(c.y*100)+"%"} r="5" fill="#22c55e"/>
-                      ))}
+                      <defs><filter id="glow3"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+                      <polygon points={pts} fill="rgba(34,197,94,0.06)" stroke="#22c55e" strokeWidth="2.5" filter="url(#glow3)"/>
+                      {liveC.map((c,i)=><circle key={i} cx={(c.x*100)+"%"} cy={(c.y*100)+"%"} r="5" fill="#22c55e"/>)}
                     </>
                   );
                 })()}
@@ -949,18 +980,15 @@ function ScannerModal({ open, onClose, onUse }) {
                 color:docFound?"#22c55e":T.gold,
                 padding:"6px 18px",borderRadius:99,fontSize:12,fontWeight:700,
                 letterSpacing:"0.1em",whiteSpace:"nowrap",
-                backdropFilter:"blur(10px)",pointerEvents:"none",
-                transition:"all 0.3s",
+                backdropFilter:"blur(10px)",pointerEvents:"none",transition:"all 0.3s",
               }}>
-                {docFound
-                  ?(autoSnap&&stableCnt>0?"⏱ HOLD STILL...":"✓ TICKET FOUND — TAP CAPTURE")
-                  :"📷 POINT CAMERA AT TICKET"}
+                {docFound?(autoSnap&&stableCnt>0?"⏱ HOLD STILL...":"✓ TICKET FOUND"):"📷 POINT AT TICKET"}
               </div>
             )}
 
             {/* Auto-capture ring */}
             {docFound&&autoSnap&&stableCnt>0&&(
-              <div style={{position:"absolute",bottom:12,left:"50%",transform:"translateX(-50%)",width:54,height:54,pointerEvents:"none"}}>
+              <div style={{position:"absolute",bottom:16,left:"50%",transform:"translateX(-50%)",width:54,height:54,pointerEvents:"none"}}>
                 <svg viewBox="0 0 54 54" style={{transform:"rotate(-90deg)"}}>
                   <circle cx="27" cy="27" r="23" fill="none" stroke="rgba(34,197,94,0.2)" strokeWidth="4"/>
                   <circle cx="27" cy="27" r="23" fill="none" stroke="#22c55e" strokeWidth="4"
@@ -971,123 +999,116 @@ function ScannerModal({ open, onClose, onUse }) {
               </div>
             )}
 
-            {/* Camera error state */}
             {camErr&&(
-              <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",
-                alignItems:"center",justifyContent:"center",gap:16,padding:24}}>
+              <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16,padding:24}}>
                 <div style={{fontSize:48}}>📷</div>
-                <div style={{color:T.muted,fontSize:13,textAlign:"center",lineHeight:1.6}}>
-                  Camera unavailable.<br/>Upload a photo instead.
-                </div>
-                <button onClick={()=>fileRef.current.click()} style={{
-                  padding:"14px 32px",background:T.gold,color:"#000",
-                  border:"none",borderRadius:12,fontWeight:800,fontSize:15,
-                  letterSpacing:"0.08em",cursor:"pointer",
-                }}>📁 UPLOAD PHOTO</button>
+                <div style={{color:T.muted,fontSize:13,textAlign:"center",lineHeight:1.6}}>Camera unavailable.<br/>Upload a photo instead.</div>
+                <button onClick={()=>fileRef.current.click()} style={{padding:"14px 32px",background:T.gold,color:"#000",border:"none",borderRadius:12,fontWeight:800,fontSize:15,cursor:"pointer"}}>📁 UPLOAD PHOTO</button>
               </div>
             )}
-
-            {/* Processing overlay */}
             {processing&&(
-              <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.7)",
-                display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14}}>
-                <div style={{width:42,height:42,border:`3px solid rgba(212,175,55,0.15)`,
-                  borderTop:`3px solid ${T.gold}`,borderRadius:"50%",animation:"spin 0.7s linear infinite"}}/>
-                <div style={{color:T.gold,fontSize:12,letterSpacing:"0.12em",fontWeight:700}}>
-                  DETECTING EDGES...
-                </div>
+              <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.72)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14}}>
+                <div style={{width:42,height:42,border:`3px solid rgba(212,175,55,0.15)`,borderTop:`3px solid ${T.gold}`,borderRadius:"50%",animation:"spin 0.7s linear infinite"}}/>
+                <div style={{color:T.gold,fontSize:12,letterSpacing:"0.12em",fontWeight:700}}>DETECTING EDGES...</div>
               </div>
             )}
           </div>
 
-          {/* Fixed bottom controls */}
-          <div style={{flexShrink:0,background:T.card,borderTop:`1px solid ${T.border}`,padding:"12px 16px 16px"}}>
-            {/* Auto-capture toggle */}
+          {/* Bottom controls — fixed height */}
+          <div style={{flexShrink:0,background:T.card,borderTop:`1px solid ${T.border}`,padding:"10px 14px 14px"}}>
             <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-              padding:"10px 14px",background:T.surface,borderRadius:12,
+              padding:"9px 12px",background:T.surface,borderRadius:12,
               border:`1px solid ${T.border}`,marginBottom:10}}>
               <div>
                 <div style={{color:T.text,fontSize:13,fontWeight:600}}>Auto-Capture</div>
-                <div style={{color:T.muted,fontSize:10,marginTop:1}}>Snaps when ticket is steady ~1 sec</div>
+                <div style={{color:T.muted,fontSize:10}}>Snaps when ticket is steady</div>
               </div>
               <div onClick={()=>setAutoSnap(v=>!v)} style={{
                 width:48,height:27,borderRadius:14,cursor:"pointer",
-                background:autoSnap?"#22c55e":T.border,
-                position:"relative",transition:"background 0.2s",flexShrink:0,
-              }}>
-                <div style={{
-                  position:"absolute",top:3.5,left:autoSnap?24:3.5,
-                  width:20,height:20,borderRadius:"50%",background:"#fff",
-                  transition:"left 0.2s",boxShadow:"0 1px 4px rgba(0,0,0,0.3)",
-                }}/>
+                background:autoSnap?"#22c55e":T.border,position:"relative",transition:"background 0.2s",flexShrink:0}}>
+                <div style={{position:"absolute",top:3.5,left:autoSnap?24:3.5,width:20,height:20,borderRadius:"50%",background:"#fff",transition:"left 0.2s",boxShadow:"0 1px 4px rgba(0,0,0,0.3)"}}/>
               </div>
             </div>
-            {/* Buttons */}
-            <div style={{display:"flex",gap:10}}>
+            <div style={{display:"flex",gap:10,marginBottom:8}}>
               {!camErr&&(
                 <button onClick={snap} disabled={!camReady||processing} style={{
-                  flex:2,height:52,
-                  background:camReady&&!processing?T.gold:T.surface,
-                  color:camReady&&!processing?"#000":T.muted,
-                  border:"none",borderRadius:12,fontWeight:800,
-                  fontSize:16,letterSpacing:"0.1em",
-                  cursor:camReady&&!processing?"pointer":"not-allowed",
-                  display:"flex",alignItems:"center",justifyContent:"center",gap:8,
-                }}>
+                  flex:2,height:52,background:camReady&&!processing?T.gold:T.surface,
+                  color:camReady&&!processing?"#000":T.muted,border:"none",borderRadius:12,
+                  fontWeight:800,fontSize:16,letterSpacing:"0.1em",cursor:camReady&&!processing?"pointer":"not-allowed",
+                  display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
                   <span style={{fontSize:18}}>📸</span> CAPTURE
                 </button>
               )}
               <button onClick={()=>fileRef.current.click()} style={{
-                flex:1,height:52,background:T.surface,
-                color:T.text,border:`1px solid ${T.border}`,borderRadius:12,
-                fontWeight:600,fontSize:14,cursor:"pointer",
-                display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-              }}>
+                flex:1,height:52,background:T.surface,color:T.text,
+                border:`1px solid ${T.border}`,borderRadius:12,fontWeight:600,
+                fontSize:14,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
                 <span>📁</span> Upload
               </button>
             </div>
-            <button onClick={onClose} style={{
-              width:"100%",height:42,marginTop:8,background:"transparent",
-              color:T.muted,border:`1px solid ${T.border}`,borderRadius:10,
-              fontWeight:600,fontSize:13,cursor:"pointer",
-            }}>✕ CANCEL</button>
+            <button onClick={onClose} style={{width:"100%",height:40,background:"transparent",color:T.muted,border:`1px solid ${T.border}`,borderRadius:10,fontWeight:600,fontSize:13,cursor:"pointer"}}>✕ CANCEL</button>
           </div>
         </>
       )}
 
-      {/* ══ STAGE 2: ADJUST ══ */}
+      {/* ══ STAGE 2: ADJUST — canvas fills full width, zoomed ══ */}
       {stage==="adjust"&&(
         <>
-          <Hdr title="✂ ADJUST EDGES" sub="Drag the 4 gold handles to the ticket corners"/>
-          {/* Canvas fills all space between header and buttons */}
-          <div style={{flex:"1 1 0",minHeight:0,display:"flex",
-            alignItems:"center",justifyContent:"center",
-            background:"#080808",padding:"8px",overflow:"hidden"}}>
+          {/* Header */}
+          <div style={{flexShrink:0,display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",background:T.card,borderBottom:`1px solid ${T.border}`}}>
+            <div>
+              <div style={{color:T.gold,fontSize:14,fontWeight:700,letterSpacing:"0.12em"}}>✂ ADJUST EDGES</div>
+              <div style={{color:T.muted,fontSize:10,marginTop:1}}>Drag handles · Pinch to zoom</div>
+            </div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              {/* Zoom controls */}
+              <button onClick={()=>setZoom(z=>Math.max(1,+(z-0.25).toFixed(2)))} style={{width:34,height:34,background:T.surface,border:`1px solid ${T.border}`,borderRadius:8,color:T.text,fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
+              <span style={{color:T.muted,fontSize:11,minWidth:32,textAlign:"center"}}>{Math.round(zoom*100)}%</span>
+              <button onClick={()=>setZoom(z=>Math.min(4,+(z+0.25).toFixed(2)))} style={{width:34,height:34,background:T.surface,border:`1px solid ${T.border}`,borderRadius:8,color:T.text,fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
+              <button onClick={onClose} style={{height:34,padding:"0 12px",background:"transparent",border:`1px solid ${T.border}`,color:T.muted,borderRadius:8,cursor:"pointer",fontSize:12}}>✕</button>
+            </div>
+          </div>
+
+          {/* Scrollable canvas container — canvas is full width, CSS zoomed */}
+          <div ref={adjWrap} style={{
+            flex:"1 1 0",minHeight:0,
+            overflow:"scroll",      // both axes scroll when zoomed
+            background:"#080808",
+            // center canvas when smaller than container
+            display:"flex",
+            alignItems:"flex-start",
+            justifyContent:"center",
+          }}>
             <canvas ref={adjCanv}
-              style={{display:"block",maxWidth:"100%",maxHeight:"100%",
-                touchAction:"none",borderRadius:6,cursor:"crosshair"}}
+              style={{
+                display:"block",
+                // CSS transform zoom — keeps canvas resolution, scales visually
+                transform:`scale(${zoom})`,
+                transformOrigin:"top center",
+                // When zoomed > 1 the canvas overflows — scroll handles it
+                flexShrink:0,
+                touchAction:"none",
+                cursor:"crosshair",
+              }}
               onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
               onTouchStart={onDown} onTouchMove={onMove} onTouchEnd={onUp}
             />
           </div>
-          <div style={{flexShrink:0,background:T.card,borderTop:`1px solid ${T.border}`,padding:"12px 16px 16px"}}>
+
+          {/* Hint + buttons */}
+          <div style={{flexShrink:0,background:T.card,borderTop:`1px solid ${T.border}`,padding:"10px 14px 14px"}}>
             <div style={{color:T.muted,fontSize:10,textAlign:"center",letterSpacing:"0.08em",marginBottom:10}}>
               ⊕ DRAG THE 4 GOLD HANDLES TO THE CORNERS OF YOUR TICKET
             </div>
             <div style={{display:"flex",gap:10}}>
-              <button onClick={()=>{reset();boot();}} style={{
-                flex:1,height:52,background:"transparent",color:T.text,
-                border:`1px solid ${T.border}`,borderRadius:12,
-                fontWeight:600,fontSize:14,cursor:"pointer",
-              }}>↩ RETAKE</button>
+              <button onClick={()=>{reset();boot();}} style={{flex:1,height:52,background:"transparent",color:T.text,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:600,fontSize:14,cursor:"pointer"}}>↩ RETAKE</button>
               <button onClick={()=>processDoc("document")} disabled={processing} style={{
                 flex:2,height:52,
                 background:processing?T.surface:T.gold,
                 color:processing?T.muted:"#000",
                 border:"none",borderRadius:12,fontWeight:800,fontSize:15,
                 cursor:processing?"not-allowed":"pointer",letterSpacing:"0.08em",
-                display:"flex",alignItems:"center",justifyContent:"center",gap:8,
-              }}>
+                display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
                 {processing
                   ?<><div style={{width:16,height:16,border:"2px solid rgba(0,0,0,0.25)",borderTop:"2px solid #000",borderRadius:"50%",animation:"spin 0.7s linear infinite"}}/> PROCESSING...</>
                   :"⚡ SCAN DOCUMENT"}
@@ -1097,73 +1118,74 @@ function ScannerModal({ open, onClose, onUse }) {
         </>
       )}
 
-      {/* ══ STAGE 3: ENHANCE ══ */}
+      {/* ══ STAGE 3: ENHANCE + CONFIRM ══ */}
       {stage==="enhance"&&(
         <>
-          <Hdr title="🎨 ENHANCE & CONFIRM" sub="Pick a filter • Confirm scan"/>
+          <div style={{flexShrink:0,display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",background:T.card,borderBottom:`1px solid ${T.border}`}}>
+            <div>
+              <div style={{color:T.gold,fontSize:14,fontWeight:700,letterSpacing:"0.12em"}}>🎨 ENHANCE & CONFIRM</div>
+              <div style={{color:T.muted,fontSize:10,marginTop:1}}>Pick a filter · Confirm scan</div>
+            </div>
+            <button onClick={onClose} style={{height:34,padding:"0 12px",background:"transparent",border:`1px solid ${T.border}`,color:T.muted,borderRadius:8,cursor:"pointer",fontSize:12}}>✕</button>
+          </div>
+
           {/* Filter strip */}
-          <div style={{flexShrink:0,display:"flex",gap:6,padding:"8px 10px",
-            background:"#090909",borderBottom:`1px solid ${T.border}`,
-            overflowX:"auto",WebkitOverflowScrolling:"touch"}}>
+          <div style={{flexShrink:0,display:"flex",gap:6,padding:"8px 10px",background:"#090909",borderBottom:`1px solid ${T.border}`,overflowX:"auto",WebkitOverflowScrolling:"touch"}}>
             {FILTERS.map(f=>(
               <button key={f.id} onClick={()=>refilter(f.id)} style={{
                 flexShrink:0,padding:"7px 12px",borderRadius:10,
                 background:filter===f.id?"rgba(212,175,55,0.12)":"transparent",
                 border:`1.5px solid ${filter===f.id?T.gold:T.border}`,
                 color:filter===f.id?T.gold:T.muted,
-                cursor:"pointer",fontFamily:"'Rajdhani',sans-serif",
-              }}>
+                cursor:"pointer",fontFamily:"'Rajdhani',sans-serif"}}>
                 <div style={{fontSize:12,fontWeight:filter===f.id?700:500,whiteSpace:"nowrap"}}>{f.icon} {f.label}</div>
                 <div style={{fontSize:9,color:T.muted,marginTop:1}}>{f.desc}</div>
               </button>
             ))}
           </div>
-          {/* Preview */}
-          <div style={{flex:"1 1 0",minHeight:0,overflow:"auto",
-            background:"#060606",display:"flex",alignItems:"center",
-            justifyContent:"center",padding:10}}>
+
+          {/* Preview — fills remaining space, image fills it */}
+          <div style={{
+            flex:"1 1 0",minHeight:0,
+            overflow:"hidden",
+            background:"#060606",
+            display:"flex",alignItems:"center",justifyContent:"center",
+            padding:"8px",
+          }}>
             {processing?(
               <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:14}}>
-                <div style={{width:42,height:42,border:`3px solid rgba(212,175,55,0.15)`,
-                  borderTop:`3px solid ${T.gold}`,borderRadius:"50%",animation:"spin 0.7s linear infinite"}}/>
+                <div style={{width:42,height:42,border:`3px solid rgba(212,175,55,0.15)`,borderTop:`3px solid ${T.gold}`,borderRadius:"50%",animation:"spin 0.7s linear infinite"}}/>
                 <div style={{color:T.muted,fontSize:12,letterSpacing:"0.1em"}}>ENHANCING...</div>
               </div>
             ):finalImage&&(
-              <img src={finalImage} alt="Scan"
-                style={{maxWidth:"100%",maxHeight:"100%",borderRadius:4,
-                  boxShadow:"0 0 0 1px rgba(212,175,55,0.15),0 8px 32px rgba(0,0,0,0.8)"}}/>
+              // Image fills the preview box — 95% width, contain aspect ratio
+              <img src={finalImage} alt="Scan" style={{
+                width:"95%",
+                maxHeight:"100%",
+                objectFit:"contain",
+                borderRadius:4,
+                boxShadow:"0 0 0 1px rgba(212,175,55,0.15),0 8px 32px rgba(0,0,0,0.8)",
+              }}/>
             )}
           </div>
-          {/* Metadata */}
+
+          {/* Metadata + actions */}
           {!processing&&finalImage&&(
-            <div style={{flexShrink:0,padding:"5px 14px",background:T.surface,
-              borderTop:`1px solid ${T.border}`,display:"flex",
-              justifyContent:"space-between",alignItems:"center"}}>
-              <span style={{color:T.muted,fontSize:10}}>
-                {outSize.w}×{outSize.h}px · {((outSize.w*outSize.h)/1e6).toFixed(1)}MP
-              </span>
-              <span style={{background:"rgba(34,197,94,0.1)",color:"#22c55e",
-                fontSize:10,padding:"3px 10px",borderRadius:99,fontWeight:700}}>
-                ✓ READY
-              </span>
+            <div style={{flexShrink:0,padding:"5px 14px",background:T.surface,borderTop:`1px solid ${T.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{color:T.muted,fontSize:10}}>{outSize.w}×{outSize.h}px · {((outSize.w*outSize.h)/1e6).toFixed(1)}MP</span>
+              <span style={{background:"rgba(34,197,94,0.1)",color:"#22c55e",fontSize:10,padding:"3px 10px",borderRadius:99,fontWeight:700}}>✓ READY</span>
             </div>
           )}
-          {/* Actions */}
-          <div style={{flexShrink:0,background:T.card,borderTop:`1px solid ${T.border}`,padding:"12px 16px 16px"}}>
+          <div style={{flexShrink:0,background:T.card,borderTop:`1px solid ${T.border}`,padding:"10px 14px 14px"}}>
             <div style={{display:"flex",gap:10}}>
-              <button onClick={()=>{setStage("adjust");setFinalImage(null);}} style={{
-                flex:1,height:52,background:"transparent",color:T.text,
-                border:`1px solid ${T.border}`,borderRadius:12,fontWeight:600,
-                fontSize:14,cursor:"pointer",
-              }}>← RE-ADJUST</button>
+              <button onClick={()=>{setStage("adjust");setFinalImage(null);setZoom(1);}} style={{flex:1,height:52,background:"transparent",color:T.text,border:`1px solid ${T.border}`,borderRadius:12,fontWeight:600,fontSize:14,cursor:"pointer"}}>← RE-ADJUST</button>
               <button disabled={processing||!finalImage} onClick={()=>onUse(finalImage)} style={{
                 flex:2,height:52,
                 background:!processing&&finalImage?T.gold:T.surface,
                 color:!processing&&finalImage?"#000":T.muted,
                 border:"none",borderRadius:12,fontWeight:800,fontSize:15,
                 cursor:!processing&&finalImage?"pointer":"not-allowed",
-                letterSpacing:"0.08em",
-              }}>✓ USE THIS SCAN</button>
+                letterSpacing:"0.08em"}}>✓ USE THIS SCAN</button>
             </div>
           </div>
         </>
@@ -1171,8 +1193,7 @@ function ScannerModal({ open, onClose, onUse }) {
 
       <canvas ref={capCanv} style={{display:"none"}}/>
       <canvas ref={outCanv} style={{display:"none"}}/>
-      <input ref={fileRef} type="file" accept="image/*"
-        capture="environment" style={{display:"none"}} onChange={handleFile}/>
+      <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={handleFile}/>
     </div>
   );
 }
