@@ -518,17 +518,20 @@ function ScannerModal({ open, onClose, onUse }) {
   const streamRef = useRef(null);
   const capCanv   = useRef(null);
   const adjCanv   = useRef(null);
-  const adjWrap   = useRef(null);  // scrollable wrapper around canvas
+  const adjWrap   = useRef(null);
   const outCanv   = useRef(null);
+  const overlayRef= useRef(null);   // canvas drawn on top of live video
   const fileRef   = useRef(null);
   const imgRef    = useRef(null);
-  const dragR     = useRef(null);  // corner drag index
+  const dragR     = useRef(null);
   const loopR     = useRef(null);
+  const drawLoopR = useRef(null);   // 30fps overlay draw loop
   const stableR   = useRef(0);
   const prevPts   = useRef(null);
   const autoR     = useRef(true);
   const cornersR  = useRef(null);
-  // pinch state
+  const liveCRef  = useRef(null);   // ref mirror of liveC for draw loop
+  const docFoundR = useRef(false);
   const pinchRef  = useRef(null);
   autoR.current   = autoSnap;
 
@@ -544,6 +547,7 @@ function ScannerModal({ open, onClose, onUse }) {
     setProcessing(false); setCamReady(false); setCamErr(false);
     setZoom(1); setPan({x:0,y:0});
     stableR.current=0; prevPts.current=null; dragR.current=null; cornersR.current=null;
+    liveCRef.current=null; docFoundR.current=false;
   }
 
   async function boot() {
@@ -558,8 +562,9 @@ function ScannerModal({ open, onClose, onUse }) {
   }
 
   function killAll() {
-    if (loopR.current) { cancelAnimationFrame(loopR.current); loopR.current=null; }
-    if (streamRef.current) { streamRef.current.getTracks().forEach(t=>t.stop()); streamRef.current=null; }
+    if (loopR.current)    { cancelAnimationFrame(loopR.current);    loopR.current=null; }
+    if (drawLoopR.current){ cancelAnimationFrame(drawLoopR.current); drawLoopR.current=null; }
+    if (streamRef.current){ streamRef.current.getTracks().forEach(t=>t.stop()); streamRef.current=null; }
   }
 
   // ── detection loop (throttled 220ms)
@@ -582,6 +587,7 @@ function ScannerModal({ open, onClose, onUse }) {
     c.getContext("2d").drawImage(v,0,0,W,H);
     const found=sobelFind(c.getContext("2d"),W,H);
     if (found) {
+      liveCRef.current=found; docFoundR.current=true;
       setLiveC(found); setDocFound(true);
       if (autoR.current && prevPts.current) {
         const moved=found.reduce((s,p,i)=>s+Math.hypot(p.x-prevPts.current[i].x,p.y-prevPts.current[i].y),0);
@@ -592,10 +598,93 @@ function ScannerModal({ open, onClose, onUse }) {
       }
       prevPts.current=found;
     } else {
+      liveCRef.current=null; docFoundR.current=false;
       setDocFound(false); setLiveC(null);
       stableR.current=0; setStableCnt(0); prevPts.current=null;
     }
   }
+
+  // ── 30fps canvas overlay draw loop — runs independently of detection
+  useEffect(()=>{
+    if(!camReady||stage!=="capture")return;
+    const draw=()=>{
+      const canvas=overlayRef.current;
+      const v=vidRef.current;
+      if(!canvas||!v||v.readyState<2)return;
+      // Match canvas pixel size to its CSS display size
+      const dpr=window.devicePixelRatio||1;
+      const cw=canvas.offsetWidth, ch=canvas.offsetHeight;
+      if(canvas.width!==cw*dpr||canvas.height!==ch*dpr){
+        canvas.width=cw*dpr; canvas.height=ch*dpr;
+      }
+      const ctx=canvas.getContext("2d");
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      const W=canvas.width, H=canvas.height;
+      ctx.scale(dpr,dpr);
+      const cw2=cw, ch2=ch; // logical pixels
+
+      const pts=liveCRef.current;
+      if(pts){
+        // Map normalized coords → screen coords
+        const sc=pts.map(p=>({x:p.x*cw2,y:p.y*ch2}));
+        // Green fill tint
+        ctx.beginPath();
+        ctx.moveTo(sc[0].x,sc[0].y);
+        sc.forEach(p=>ctx.lineTo(p.x,p.y));
+        ctx.closePath();
+        ctx.fillStyle="rgba(34,197,94,0.07)";
+        ctx.fill();
+        // Animated glowing border
+        const t=Date.now()/600;
+        const alpha=0.7+0.3*Math.sin(t);
+        // Outer glow pass
+        ctx.beginPath();
+        ctx.moveTo(sc[0].x,sc[0].y);
+        sc.forEach(p=>ctx.lineTo(p.x,p.y));
+        ctx.closePath();
+        ctx.strokeStyle=`rgba(34,197,94,${(alpha*0.4).toFixed(2)})`;
+        ctx.lineWidth=8;
+        ctx.stroke();
+        // Main border
+        ctx.beginPath();
+        ctx.moveTo(sc[0].x,sc[0].y);
+        sc.forEach(p=>ctx.lineTo(p.x,p.y));
+        ctx.closePath();
+        ctx.strokeStyle=`rgba(34,197,94,${alpha.toFixed(2)})`;
+        ctx.lineWidth=3;
+        ctx.stroke();
+        // Corner circles
+        sc.forEach((p,i)=>{
+          ctx.beginPath();ctx.arc(p.x,p.y,8,0,Math.PI*2);
+          ctx.fillStyle="#22c55e";ctx.fill();
+          ctx.strokeStyle="rgba(255,255,255,0.8)";ctx.lineWidth=2;ctx.stroke();
+        });
+        // Corner L-brackets (CamScanner style)
+        const bLen=28,bW=4;
+        const DIRS=[[1,1],[-1,1],[-1,-1],[1,-1]];
+        ctx.strokeStyle="#fff";ctx.lineWidth=bW;ctx.lineCap="round";
+        sc.forEach((p,i)=>{
+          const[dx,dy]=DIRS[i];
+          ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(p.x+dx*bLen,p.y);ctx.stroke();
+          ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(p.x,p.y+dy*bLen);ctx.stroke();
+        });
+        ctx.setTransform(1,0,0,1,0,0);
+      } else {
+        // Guide brackets when no doc detected
+        const pad={x:cw2*0.08,y:ch2*0.12};
+        const bLen=32,bW=3.5;
+        ctx.strokeStyle="rgba(212,175,55,0.6)";ctx.lineWidth=bW;ctx.lineCap="round";
+        [[pad.x,pad.y,1,1],[cw2-pad.x,pad.y,-1,1],[cw2-pad.x,ch2-pad.y,-1,-1],[pad.x,ch2-pad.y,1,-1]].forEach(([x,y,dx,dy])=>{
+          ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+dx*bLen,y);ctx.stroke();
+          ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x,y+dy*bLen);ctx.stroke();
+        });
+        ctx.setTransform(1,0,0,1,0,0);
+      }
+    };
+    const loop=()=>{ draw(); drawLoopR.current=requestAnimationFrame(loop); };
+    drawLoopR.current=requestAnimationFrame(loop);
+    return ()=>{ if(drawLoopR.current)cancelAnimationFrame(drawLoopR.current); };
+  },[camReady,stage]);
 
   function sobelFind(ctx,W,H) {
     const px=ctx.getImageData(0,0,W,H).data;
@@ -944,31 +1033,14 @@ function ScannerModal({ open, onClose, onUse }) {
                 display:camErr?"none":"block",
               }}/>
 
-            {/* Live SVG overlay */}
+            {/* Canvas overlay — drawn directly on top of video at 30fps */}
             {!camErr&&(
-              <svg style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none"}}>
-                {!liveC&&[
-                  [6,10],[94,10],[94,90],[6,90]
-                ].map(([cx,cy],i)=>{
-                  const lx=cx<50?1:-1,ly=cy<50?1:-1,len=5;
-                  return(
-                    <g key={i} stroke="rgba(212,175,55,0.7)" strokeWidth="3.5" strokeLinecap="round">
-                      <line x1={cx+"%"} y1={cy+"%"} x2={(cx+lx*len)+"%"} y2={cy+"%"}/>
-                      <line x1={cx+"%"} y1={cy+"%"} x2={cx+"%"} y2={(cy+ly*len)+"%"}/>
-                    </g>
-                  );
-                })}
-                {liveC&&(()=>{
-                  const pts=liveC.map(c=>`${(c.x*100).toFixed(1)}%,${(c.y*100).toFixed(1)}%`).join(" ");
-                  return(
-                    <>
-                      <defs><filter id="glow3"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
-                      <polygon points={pts} fill="rgba(34,197,94,0.06)" stroke="#22c55e" strokeWidth="2.5" filter="url(#glow3)"/>
-                      {liveC.map((c,i)=><circle key={i} cx={(c.x*100)+"%"} cy={(c.y*100)+"%"} r="5" fill="#22c55e"/>)}
-                    </>
-                  );
-                })()}
-              </svg>
+              <canvas ref={overlayRef}
+                style={{
+                  position:"absolute",inset:0,
+                  width:"100%",height:"100%",
+                  pointerEvents:"none",
+                }}/>
             )}
 
             {/* Status badge */}
