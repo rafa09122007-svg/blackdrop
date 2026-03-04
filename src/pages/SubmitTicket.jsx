@@ -736,7 +736,7 @@ onClick={addLoad}
 };
 
       const res = await fetch( // must match current web app version
-        "https://script.google.com/macros/s/AKfycbwZ4HWc7_V8wEIxI_wvTpdTYq9KGoLoYNgE1JZGrijFMGxJydCnbmoIFi-j1bbLB0CKJQ/exec",
+        "https://script.google.com/macros/s/AKfycbwDJZilqySP8zZBHetfQyd-xloh3dz_eKbpwwkLiKohqeQDIRPM8L_H6AjtTU7CSYaT/exec",
         {
           method: "POST",
           headers: {
