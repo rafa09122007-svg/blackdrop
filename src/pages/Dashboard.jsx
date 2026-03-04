@@ -1,120 +1,63 @@
-import React from "react";
+import React, { useCallback } from "react";
+import { T, injectGlobalStyles } from "./shared";
+import { Logo, GoldBtn, GhostBtn } from "./shared";
 
 export default function Dashboard({ phone, onLogout, onStartTicket, onOpenQueue }) {
-console.log("onOpenQueue:", onOpenQueue);
+  injectGlobalStyles();
+
+  const hour = new Date().getHours();
+  const greeting =
+    hour < 12 ? "Good morning" :
+    hour < 17 ? "Good afternoon" :
+               "Good evening";
+
   return (
-    <div style={styles.container}>
+    <div style={{
+      background: T.bg, minHeight: "100vh", display: "flex",
+      justifyContent: "center", alignItems: "center", padding: 16,
+    }}>
+      <div className="pop" style={{
+        width: "100%", maxWidth: 380, background: T.card,
+        borderRadius: 16, border: `1px solid ${T.border}`,
+        borderLeft: `3px solid ${T.gold}`, padding: "32px 24px",
+        boxShadow: "0 24px 80px rgba(0,0,0,0.65)",
+      }}>
+        <Logo />
 
-      <div style={styles.card}>
-
-        <div style={styles.header}>
-          BLACK DROP
+        {/* User badge */}
+        <div style={{
+          background: T.surface, borderRadius: 10, padding: "12px 16px",
+          marginBottom: 24, border: `1px solid ${T.border}`,
+          display: "flex", alignItems: "center", gap: 12,
+        }}>
+          <div style={{
+            width: 38, height: 38, borderRadius: "50%",
+            background: "rgba(212,175,55,0.1)", border: `1px solid ${T.goldDim}`,
+            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18,
+          }}>
+            👷
+          </div>
+          <div>
+            <div style={{ color: T.muted, fontSize: 10, letterSpacing: "0.1em" }}>
+              {greeting}
+            </div>
+            <div style={{ color: T.text, fontWeight: 600, fontSize: 14 }}>{phone}</div>
+          </div>
         </div>
 
-        <div style={styles.subheader}>
-          FIELD COMMAND
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <GoldBtn onClick={onStartTicket}>📋 SUBMIT NEW TICKET</GoldBtn>
+          <GhostBtn onClick={onOpenQueue}>📥 SUBMISSION QUEUE</GhostBtn>
+          <GhostBtn onClick={onLogout} danger>← LOG OUT</GhostBtn>
         </div>
 
-        <div style={styles.phone}>
-          LOGGED IN: {phone}
+        <div style={{
+          marginTop: 24, paddingTop: 16, borderTop: `1px solid ${T.border}`,
+          color: T.muted, fontSize: 10, textAlign: "center", letterSpacing: "0.1em",
+        }}>
+          BLACK DROP TRUCKING LLC · FIELD SYSTEM
         </div>
-
-        <button style={styles.button} onClick={onStartTicket}>
-          SUBMIT TICKET
-        </button>
-
-        <button style={styles.buttonGhost} onClick={onOpenQueue}>
-  BOUNCE BACK QUEUE
-</button>
-
-        <button style={styles.buttonGhost} onClick={onLogout}>
-          LOG OUT
-        </button>
-
       </div>
-
     </div>
   );
 }
-
-
-const styles = {
-
-  container: {
-    background: "#0a0a0a",
-    minHeight: "100vh",
-    width: "100%",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    padding: "16px",
-    boxSizing: "border-box",
-  },
-
-  card: {
-    width: "100%",
-    maxWidth: "380px",
-    background: "#141414",
-    padding: "20px",
-    borderRadius: "12px",
-    borderLeft: "4px solid #D4AF37",
-    boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
-    boxSizing: "border-box",
-  },
-
-  header: {
-    color: "#D4AF37",
-    fontSize: "13px",
-    fontWeight: "900",
-    letterSpacing: "3px",
-    textAlign: "center",
-    marginBottom: "4px",
-  },
-
-  subheader: {
-    color: "#D4AF37",
-    fontSize: "20px",
-    fontWeight: "900",
-    letterSpacing: "2px",
-    textAlign: "center",
-    marginBottom: "20px",
-  },
-
-  phone: {
-    color: "#888",
-    fontSize: "13px",
-    marginBottom: "20px",
-    textAlign: "center",
-  },
-
-  button: {
-    width: "100%",
-    background: "#D4AF37",
-    color: "black",
-    border: "none",
-    padding: "12px",
-    fontWeight: "900",
-    letterSpacing: "2px",
-    borderRadius: "8px",
-    cursor: "pointer",
-    fontSize: "13px",
-    marginBottom: "10px",
-    boxSizing: "border-box",
-  },
-
-  buttonGhost: {
-    width: "100%",
-    background: "#1f1f1f",
-    color: "white",
-    border: "1px solid #333",
-    padding: "12px",
-    fontWeight: "900",
-    letterSpacing: "2px",
-    borderRadius: "8px",
-    cursor: "pointer",
-    fontSize: "13px",
-    marginBottom: "10px",
-    boxSizing: "border-box",
-  },
-
-};
