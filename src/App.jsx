@@ -494,382 +494,259 @@ function TicketSuccess({ onBack }) {
   );
 }
 
-// ─── ADVANCED DOCUMENT SCANNER (CamScanner-level) ────────────────────────────
+// ─── DOCUMENT SCANNER — Mobile-First v4 ─────────────────────────────────────
 function ScannerModal({ open, onClose, onUse }) {
-  const [stage,       setStage]       = useState("capture"); // capture | adjust | enhance
-  const [docDetected, setDocDetected] = useState(false);
-  const [autoCapture, setAutoCapture] = useState(true);
-  const [stableCount, setStableCount] = useState(0);
-  const [corners,     setCorners]     = useState(null);
-  const [dragIdx,     setDragIdx]     = useState(null);
-  const [filter,      setFilter]      = useState("document");
-  const [processing,  setProcessing]  = useState(false);
-  const [finalImage,  setFinalImage]  = useState(null);
-  const [ready,       setReady]       = useState(false);
-  const [camError,    setCamError]    = useState(false);
-  const [liveCorners, setLiveCorners] = useState(null); // detected corners on live feed
+  const [stage,      setStage]      = useState("capture");
+  const [docFound,   setDocFound]   = useState(false);
+  const [autoSnap,   setAutoSnap]   = useState(true);
+  const [stableCnt,  setStableCnt]  = useState(0);
+  const [corners,    setCorners]    = useState(null);
+  const [filter,     setFilter]     = useState("document");
+  const [processing, setProcessing] = useState(false);
+  const [finalImage, setFinalImage] = useState(null);
+  const [camReady,   setCamReady]   = useState(false);
+  const [camErr,     setCamErr]     = useState(false);
+  const [liveC,      setLiveC]      = useState(null);
+  const [outSize,    setOutSize]    = useState({w:0,h:0});
 
-  const videoRef      = useRef(null);
-  const streamRef     = useRef(null);
-  const captureCanv   = useRef(null);
-  const adjustCanv    = useRef(null);
-  const outputCanv    = useRef(null);
-  const fileInputRef  = useRef(null);
-  const imgRef        = useRef(null);
-  const dragRef       = useRef(null);
-  const detectionLoop = useRef(null);
-  const stableRef     = useRef(0);
-  const prevCornersRef= useRef(null);
-  const autoCaptRef   = useRef(true);
+  const vidRef    = useRef(null);
+  const streamRef = useRef(null);
+  const capCanv   = useRef(null);
+  const adjCanv   = useRef(null);
+  const outCanv   = useRef(null);
+  const fileRef   = useRef(null);
+  const imgRef    = useRef(null);
+  const dragR     = useRef(null);
+  const loopR     = useRef(null);
+  const stableR   = useRef(0);
+  const prevPts   = useRef(null);
+  const autoR     = useRef(true);
+  const cornersR  = useRef(null);
+  autoR.current   = autoSnap;
 
-  autoCaptRef.current = autoCapture;
-
-  // ── camera start/stop
+  // ── open/close lifecycle
   useEffect(() => {
     if (!open) return;
-    setStage("capture"); setDocDetected(false); setCorners(null);
-    setLiveCorners(null); setFilter("document"); setFinalImage(null);
-    setProcessing(false); setReady(false); setCamError(false);
-    stableRef.current = 0;
-    let active = true;
-
-    (async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: "environment" },
-            width:  { ideal: 3840, min: 1280 },
-            height: { ideal: 2160, min: 720 },
-            focusMode: "continuous",
-          }
-        });
-        if (!active) return;
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
-        }
-        setReady(true);
-      } catch {
-        setCamError(true);
-        setReady(false);
-      }
-    })();
-
-    return () => {
-      active = false;
-      stopCamera();
-    };
+    reset(); boot();
+    return () => killAll();
   }, [open]);
 
-  function stopCamera() {
-    if (detectionLoop.current) { cancelAnimationFrame(detectionLoop.current); detectionLoop.current = null; }
-    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+  function reset() {
+    setStage("capture"); setDocFound(false); setCorners(null);
+    setLiveC(null); setFilter("document"); setFinalImage(null);
+    setProcessing(false); setCamReady(false); setCamErr(false);
+    stableR.current=0; prevPts.current=null; dragR.current=null; cornersR.current=null;
   }
 
-  // ── live edge detection loop
-  useEffect(() => {
-    if (!ready || stage !== "capture") return;
-    let frameId;
-    const detect = () => {
-      runLiveDetection();
-      frameId = requestAnimationFrame(detect);
-    };
-    frameId = requestAnimationFrame(detect);
-    detectionLoop.current = frameId;
-    return () => { if (frameId) cancelAnimationFrame(frameId); };
-  }, [ready, stage]);
-
-  // ── sample video every ~200ms for edge detection (throttled)
-  const lastDetectTime = useRef(0);
-  function runLiveDetection() {
-    const now = Date.now();
-    if (now - lastDetectTime.current < 180) return;
-    lastDetectTime.current = now;
-
-    const v = videoRef.current;
-    if (!v || v.readyState < 2) return;
-
-    const W = 320, H = 240; // small for speed
-    const c = document.createElement("canvas");
-    c.width = W; c.height = H;
-    const ctx = c.getContext("2d");
-    ctx.drawImage(v, 0, 0, W, H);
-
+  async function boot() {
     try {
-      const detected = detectDocumentCorners(ctx, W, H);
-      if (detected) {
-        setLiveCorners(detected);
-        setDocDetected(true);
-
-        // Check stability for auto-capture
-        if (prevCornersRef.current && autoCaptRef.current) {
-          const moved = detected.reduce((sum, p, i) => {
-            const pp = prevCornersRef.current[i];
-            return sum + Math.hypot(p.x - pp.x, p.y - pp.y);
-          }, 0);
-          if (moved < 0.03) {
-            stableRef.current++;
-            setStableCount(stableRef.current);
-            if (stableRef.current >= 5) { // stable for ~1 second
-              captureNow();
-              return;
-            }
-          } else {
-            stableRef.current = 0;
-            setStableCount(0);
-          }
-        }
-        prevCornersRef.current = detected;
-      } else {
-        setDocDetected(false);
-        setLiveCorners(null);
-        stableRef.current = 0;
-        setStableCount(0);
-        prevCornersRef.current = null;
-      }
-    } catch(_) {}
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video:{facingMode:{ideal:"environment"},width:{ideal:1920,min:640},height:{ideal:1440,min:480}}
+      });
+      streamRef.current=stream;
+      if (vidRef.current){vidRef.current.srcObject=stream; await vidRef.current.play();}
+      setCamReady(true);
+    } catch { setCamErr(true); }
   }
 
-  // ── Sobel edge detection + rectangle finding
-  function detectDocumentCorners(ctx, W, H) {
-    const px = ctx.getImageData(0, 0, W, H).data;
-    const gray = new Float32Array(W * H);
-    for (let i = 0; i < W * H; i++)
-      gray[i] = 0.299*px[i*4] + 0.587*px[i*4+1] + 0.114*px[i*4+2];
-
-    // Sobel
-    const edge = new Float32Array(W * H);
-    let maxE = 0;
-    for (let y = 1; y < H-1; y++) {
-      for (let x = 1; x < W-1; x++) {
-        const gx = -gray[(y-1)*W+(x-1)] - 2*gray[y*W+(x-1)] - gray[(y+1)*W+(x-1)]
-                 +  gray[(y-1)*W+(x+1)] + 2*gray[y*W+(x+1)] + gray[(y+1)*W+(x+1)];
-        const gy = -gray[(y-1)*W+(x-1)] - 2*gray[(y-1)*W+x] - gray[(y-1)*W+(x+1)]
-                 +  gray[(y+1)*W+(x-1)] + 2*gray[(y+1)*W+x] + gray[(y+1)*W+(x+1)];
-        const e = Math.sqrt(gx*gx + gy*gy);
-        edge[y*W+x] = e;
-        if (e > maxE) maxE = e;
-      }
-    }
-
-    if (maxE < 10) return null;
-    const thresh = maxE * 0.20;
-
-    let minX=W, maxX=0, minY=H, maxY=0, found=false;
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        if (edge[y*W+x] > thresh) {
-          if (x<minX)minX=x; if(x>maxX)maxX=x;
-          if (y<minY)minY=y; if(y>maxY)maxY=y;
-          found = true;
-        }
-      }
-    }
-
-    if (!found) return null;
-    const rw = (maxX-minX)/W, rh = (maxY-minY)/H;
-    if (rw < 0.25 || rh < 0.25 || rw > 0.98 || rh > 0.98) return null;
-
-    const pad = 0.015;
-    return [
-      { x: Math.max(0.01, minX/W - pad), y: Math.max(0.01, minY/H - pad) },
-      { x: Math.min(0.99, maxX/W + pad), y: Math.max(0.01, minY/H - pad) },
-      { x: Math.min(0.99, maxX/W + pad), y: Math.min(0.99, maxY/H + pad) },
-      { x: Math.max(0.01, minX/W - pad), y: Math.min(0.99, maxY/H + pad) },
-    ];
+  function killAll() {
+    if(loopR.current){cancelAnimationFrame(loopR.current);loopR.current=null;}
+    if(streamRef.current){streamRef.current.getTracks().forEach(t=>t.stop());streamRef.current=null;}
   }
 
-  // ── CAPTURE
-  function captureNow() {
-    if (detectionLoop.current) { cancelAnimationFrame(detectionLoop.current); detectionLoop.current = null; }
-    const v = videoRef.current;
-    if (!v) return;
-    const c = captureCanv.current;
-    c.width = v.videoWidth; c.height = v.videoHeight;
-    c.getContext("2d").drawImage(v, 0, 0);
-    const dataUrl = c.toDataURL("image/jpeg", 0.97);
-
-    stopCamera();
-
-    // Load full res image and run high-res edge detection
-    const img = new Image();
-    img.onload = () => {
-      imgRef.current = img;
-      // Run detection on full res
-      const MAX = 800;
-      const scale = Math.min(1, MAX / Math.max(img.width, img.height));
-      const W2 = Math.round(img.width*scale), H2 = Math.round(img.height*scale);
-      const tmp = document.createElement("canvas");
-      tmp.width=W2; tmp.height=H2;
-      const tctx = tmp.getContext("2d");
-      tctx.drawImage(img, 0, 0, W2, H2);
-      const det = detectDocumentCorners(tctx, W2, H2);
-      setCorners(det || defaultCorners());
-      setStage("adjust");
-      setProcessing(false);
+  // ── detection loop
+  const lastT=useRef(0);
+  useEffect(()=>{
+    if(!camReady||stage!=="capture")return;
+    const tick=()=>{
+      const now=Date.now();
+      if(now-lastT.current>220){lastT.current=now;runDetect();}
+      loopR.current=requestAnimationFrame(tick);
     };
-    img.src = dataUrl;
-    setProcessing(true);
+    loopR.current=requestAnimationFrame(tick);
+    return ()=>{if(loopR.current)cancelAnimationFrame(loopR.current);};
+  },[camReady,stage]);
+
+  function runDetect(){
+    const v=vidRef.current; if(!v||v.readyState<2||!v.videoWidth)return;
+    const W=320,H=Math.round(320*v.videoHeight/Math.max(v.videoWidth,1));
+    const c=document.createElement("canvas");c.width=W;c.height=H;
+    c.getContext("2d").drawImage(v,0,0,W,H);
+    const found=sobelFind(c.getContext("2d"),W,H);
+    if(found){
+      setLiveC(found);setDocFound(true);
+      if(autoR.current&&prevPts.current){
+        const moved=found.reduce((s,p,i)=>s+Math.hypot(p.x-prevPts.current[i].x,p.y-prevPts.current[i].y),0);
+        if(moved<0.022){
+          stableR.current++;setStableCnt(stableR.current);
+          if(stableR.current>=5){snap();return;}
+        } else {stableR.current=0;setStableCnt(0);}
+      }
+      prevPts.current=found;
+    } else {
+      setDocFound(false);setLiveC(null);
+      stableR.current=0;setStableCnt(0);prevPts.current=null;
+    }
   }
 
-  function handleFile(e) {
-    const f = e.target.files[0]; if (!f) return;
-    stopCamera();
-    setProcessing(true);
-    const r = new FileReader();
-    r.onload = ev => {
-      const img = new Image();
-      img.onload = () => {
-        imgRef.current = img;
-        captureCanv.current.width = img.width;
-        captureCanv.current.height = img.height;
-        captureCanv.current.getContext("2d").drawImage(img, 0, 0);
-        const MAX = 800;
-        const scale = Math.min(1, MAX / Math.max(img.width, img.height));
-        const W2=Math.round(img.width*scale), H2=Math.round(img.height*scale);
-        const tmp=document.createElement("canvas"); tmp.width=W2; tmp.height=H2;
-        const tctx=tmp.getContext("2d"); tctx.drawImage(img,0,0,W2,H2);
-        const det=detectDocumentCorners(tctx,W2,H2);
-        setCorners(det || defaultCorners());
-        setProcessing(false);
-        setStage("adjust");
+  function sobelFind(ctx,W,H){
+    const px=ctx.getImageData(0,0,W,H).data;
+    const g=new Float32Array(W*H);
+    for(let i=0;i<W*H;i++)g[i]=0.299*px[i*4]+0.587*px[i*4+1]+0.114*px[i*4+2];
+    const e=new Float32Array(W*H);let mx=0;
+    for(let y=1;y<H-1;y++)for(let x=1;x<W-1;x++){
+      const gx=-g[(y-1)*W+(x-1)]-2*g[y*W+(x-1)]-g[(y+1)*W+(x-1)]+g[(y-1)*W+(x+1)]+2*g[y*W+(x+1)]+g[(y+1)*W+(x+1)];
+      const gy=-g[(y-1)*W+(x-1)]-2*g[(y-1)*W+x]-g[(y-1)*W+(x+1)]+g[(y+1)*W+(x-1)]+2*g[(y+1)*W+x]+g[(y+1)*W+(x+1)];
+      const v=Math.sqrt(gx*gx+gy*gy);e[y*W+x]=v;if(v>mx)mx=v;
+    }
+    if(mx<8)return null;
+    const th=mx*0.22;let x0=W,x1=0,y0=H,y1=0,ok=false;
+    for(let y=0;y<H;y++)for(let x=0;x<W;x++)if(e[y*W+x]>th){if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;ok=true;}
+    if(!ok||(x1-x0)/W<0.25||(y1-y0)/H<0.25)return null;
+    const p=0.01;
+    return [{x:Math.max(0,x0/W-p),y:Math.max(0,y0/H-p)},{x:Math.min(1,x1/W+p),y:Math.max(0,y0/H-p)},{x:Math.min(1,x1/W+p),y:Math.min(1,y1/H+p)},{x:Math.max(0,x0/W-p),y:Math.min(1,y1/H+p)}];
+  }
+
+  function defCorners(){const p=0.07;return [{x:p,y:p},{x:1-p,y:p},{x:1-p,y:1-p},{x:p,y:1-p}];}
+
+  function snap(){
+    if(loopR.current){cancelAnimationFrame(loopR.current);loopR.current=null;}
+    const v=vidRef.current;if(!v)return;
+    const c=capCanv.current;
+    c.width=v.videoWidth;c.height=v.videoHeight;
+    c.getContext("2d").drawImage(v,0,0);
+    setProcessing(true);killAll();
+    const img=new Image();
+    img.onload=()=>{
+      imgRef.current=img;
+      const S=800,sc=Math.min(1,S/Math.max(img.width,img.height));
+      const tw=Math.round(img.width*sc),th=Math.round(img.height*sc);
+      const tc=document.createElement("canvas");tc.width=tw;tc.height=th;
+      tc.getContext("2d").drawImage(img,0,0,tw,th);
+      const det=sobelFind(tc.getContext("2d"),tw,th)||defCorners();
+      cornersR.current=det;setCorners(det);setProcessing(false);setStage("adjust");
+    };
+    img.src=c.toDataURL("image/jpeg",0.96);
+  }
+
+  function handleFile(e){
+    const f=e.target.files[0];if(!f)return;
+    killAll();setProcessing(true);
+    const r=new FileReader();
+    r.onload=ev=>{
+      const img=new Image();
+      img.onload=()=>{
+        imgRef.current=img;
+        capCanv.current.width=img.width;capCanv.current.height=img.height;
+        capCanv.current.getContext("2d").drawImage(img,0,0);
+        const S=800,sc=Math.min(1,S/Math.max(img.width,img.height));
+        const tw=Math.round(img.width*sc),th=Math.round(img.height*sc);
+        const tc=document.createElement("canvas");tc.width=tw;tc.height=th;
+        tc.getContext("2d").drawImage(img,0,0,tw,th);
+        const det=sobelFind(tc.getContext("2d"),tw,th)||defCorners();
+        cornersR.current=det;setCorners(det);setProcessing(false);setStage("adjust");
       };
-      img.src = ev.target.result;
+      img.src=ev.target.result;
     };
-    r.readAsDataURL(f);
-    e.target.value="";
+    r.readAsDataURL(f);e.target.value="";
   }
 
-  function defaultCorners() {
-    const p=0.06;
-    return [{x:p,y:p},{x:1-p,y:p},{x:1-p,y:1-p},{x:p,y:1-p}];
-  }
+  // ── draw adjustment canvas — fills parent width
+  useEffect(()=>{
+    if(stage!=="adjust"||!corners||!adjCanv.current||!imgRef.current)return;
+    cornersR.current=corners;
+    drawAdj(corners);
+  },[stage,corners]);
 
-  // ── draw adjustment canvas
-  useEffect(() => {
-    if (stage!=="adjust"||!corners||!adjustCanv.current||!imgRef.current) return;
-    drawAdjust(corners);
-  }, [stage, corners]);
-
-  function drawAdjust(C) {
-    const canvas = adjustCanv.current, img = imgRef.current;
-    if (!canvas||!img) return;
-    const vw = window.innerWidth - 32;
-    const vh = window.innerHeight * 0.60;
-    const scale = Math.min(vw/img.width, vh/img.height, 1);
-    canvas.width  = Math.round(img.width  * scale);
-    canvas.height = Math.round(img.height * scale);
-    const ctx = canvas.getContext("2d");
-
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    const pts = C.map(c => ({ x: c.x*canvas.width, y: c.y*canvas.height }));
-
-    // Dim outside
-    ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-
-    // Clear inside polygon
-    ctx.save();
-    ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y);
-    pts.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.closePath();
-    ctx.globalCompositeOperation="destination-out"; ctx.fill();
-    ctx.restore();
-
-    // Redraw image inside
-    ctx.save();
-    ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y);
-    pts.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.closePath();
-    ctx.clip(); ctx.drawImage(img,0,0,canvas.width,canvas.height);
-    ctx.restore();
-
-    // Border glow
-    ctx.shadowColor="#D4AF37"; ctx.shadowBlur=8;
-    ctx.strokeStyle="#D4AF37"; ctx.lineWidth=2.5;
-    ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y);
-    pts.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.closePath(); ctx.stroke();
-    ctx.shadowBlur=0;
-
-    // Corner handles — large for mobile
+  function drawAdj(C){
+    const canvas=adjCanv.current,img=imgRef.current;if(!canvas||!img)return;
+    const par=canvas.parentElement;
+    const maxW=(par?.clientWidth||window.innerWidth)-0;
+    const maxH=window.innerHeight*0.62;
+    const sc=Math.min(maxW/img.width,maxH/img.height,1);
+    canvas.width=Math.round(img.width*sc);
+    canvas.height=Math.round(img.height*sc);
+    const ctx=canvas.getContext("2d");
+    const W=canvas.width,H=canvas.height;
+    ctx.drawImage(img,0,0,W,H);
+    const pts=C.map(c=>({x:c.x*W,y:c.y*H}));
+    // dim outside
+    ctx.fillStyle="rgba(0,0,0,0.58)";ctx.fillRect(0,0,W,H);
+    // clear inside
+    ctx.save();ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);
+    pts.forEach(p=>ctx.lineTo(p.x,p.y));ctx.closePath();
+    ctx.globalCompositeOperation="destination-out";ctx.fill();ctx.restore();
+    // redraw image inside
+    ctx.save();ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);
+    pts.forEach(p=>ctx.lineTo(p.x,p.y));ctx.closePath();
+    ctx.clip();ctx.drawImage(img,0,0,W,H);ctx.restore();
+    // glowing border
+    ctx.save();ctx.shadowColor="#D4AF37";ctx.shadowBlur=12;
+    ctx.strokeStyle="#D4AF37";ctx.lineWidth=2.5;
+    ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);
+    pts.forEach(p=>ctx.lineTo(p.x,p.y));ctx.closePath();ctx.stroke();ctx.restore();
+    // handles — 44px touch target
     pts.forEach((p,i)=>{
-      // outer ring
-      ctx.beginPath(); ctx.arc(p.x,p.y,22,0,Math.PI*2);
-      ctx.fillStyle="rgba(212,175,55,0.2)"; ctx.fill();
-      // inner circle
-      ctx.beginPath(); ctx.arc(p.x,p.y,14,0,Math.PI*2);
-      ctx.fillStyle=dragRef.current===i?"#ffffff":"#D4AF37"; ctx.fill();
-      ctx.strokeStyle="rgba(0,0,0,0.6)"; ctx.lineWidth=2; ctx.stroke();
-      // crosshair
-      ctx.strokeStyle=dragRef.current===i?"#000":"rgba(0,0,0,0.7)";
-      ctx.lineWidth=1.5;
-      ctx.beginPath(); ctx.moveTo(p.x-6,p.y); ctx.lineTo(p.x+6,p.y); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(p.x,p.y-6); ctx.lineTo(p.x,p.y+6); ctx.stroke();
+      ctx.beginPath();ctx.arc(p.x,p.y,28,0,Math.PI*2);
+      ctx.fillStyle="rgba(212,175,55,0.15)";ctx.fill();
+      ctx.beginPath();ctx.arc(p.x,p.y,18,0,Math.PI*2);
+      ctx.fillStyle=dragR.current===i?"#ffffff":"#D4AF37";
+      ctx.shadowColor="rgba(0,0,0,0.6)";ctx.shadowBlur=8;ctx.fill();ctx.shadowBlur=0;
+      ctx.strokeStyle="rgba(0,0,0,0.5)";ctx.lineWidth=2;ctx.stroke();
+      ctx.strokeStyle=dragR.current===i?"#444":"rgba(0,0,0,0.7)";ctx.lineWidth=2.5;
+      ctx.beginPath();ctx.moveTo(p.x-9,p.y);ctx.lineTo(p.x+9,p.y);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(p.x,p.y-9);ctx.lineTo(p.x,p.y+9);ctx.stroke();
     });
   }
 
-  function getXY(e) {
-    const canvas=adjustCanv.current;
-    const rect=canvas.getBoundingClientRect();
-    const scX=canvas.width/rect.width, scY=canvas.height/rect.height;
-    const src=e.touches?e.touches[0]:e;
-    return { x:(src.clientX-rect.left)*scX, y:(src.clientY-rect.top)*scY };
+  function getXY(e){
+    const c=adjCanv.current,r=c.getBoundingClientRect();
+    const sx=c.width/r.width,sy=c.height/r.height;
+    const s=e.touches?e.touches[0]:e;
+    return{x:(s.clientX-r.left)*sx,y:(s.clientY-r.top)*sy};
   }
-
-  function onPtrDown(e) {
+  function onDown(e){
     e.preventDefault();
-    const {x,y}=getXY(e);
-    const canvas=adjustCanv.current;
-    const pts=corners.map(c=>({x:c.x*canvas.width,y:c.y*canvas.height}));
-    const hit=pts.findIndex(p=>Math.hypot(p.x-x,p.y-y)<32);
-    if(hit!==-1){dragRef.current=hit;setDragIdx(hit);}
+    const{x,y}=getXY(e),c=adjCanv.current;
+    const pts=cornersR.current.map(p=>({x:p.x*c.width,y:p.y*c.height}));
+    const hit=pts.findIndex(p=>Math.hypot(p.x-x,p.y-y)<36);
+    if(hit!==-1)dragR.current=hit;
   }
-
-  function onPtrMove(e) {
-    if(dragRef.current===null)return;
+  function onMove(e){
+    if(dragR.current===null||dragR.current===undefined)return;
     e.preventDefault();
-    const {x,y}=getXY(e);
-    const canvas=adjustCanv.current;
-    const newC=corners.map((c,i)=>i===dragRef.current
-      ?{x:Math.max(0.01,Math.min(0.99,x/canvas.width)),y:Math.max(0.01,Math.min(0.99,y/canvas.height))}:c);
-    setCorners(newC);
-    drawAdjust(newC);
+    const{x,y}=getXY(e),c=adjCanv.current;
+    const newC=cornersR.current.map((p,i)=>i===dragR.current
+      ?{x:Math.max(0.01,Math.min(0.99,x/c.width)),y:Math.max(0.01,Math.min(0.99,y/c.height))}:p);
+    cornersR.current=newC;setCorners([...newC]);drawAdj(newC);
   }
+  function onUp(){dragR.current=null;}
 
-  function onPtrUp(){dragRef.current=null;setDragIdx(null);}
-
-  // ── PERSPECTIVE WARP + ENHANCEMENT
-  function processDocument(selectedFilter) {
+  // ── warp + enhance
+  function processDoc(f){
     setProcessing(true);
+    const C=cornersR.current||corners;
     setTimeout(()=>{
-      try {
-        const img=imgRef.current;
-        const W=img.width, H=img.height;
-        const pts=corners.map(c=>({x:c.x*W,y:c.y*H}));
-
+      try{
+        const img=imgRef.current,IW=img.width,IH=img.height;
+        const pts=C.map(c=>({x:c.x*IW,y:c.y*IH}));
         const wT=Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y);
         const wB=Math.hypot(pts[2].x-pts[3].x,pts[2].y-pts[3].y);
         const hL=Math.hypot(pts[3].x-pts[0].x,pts[3].y-pts[0].y);
         const hR=Math.hypot(pts[2].x-pts[1].x,pts[2].y-pts[1].y);
+        const rawW=Math.max(wT,wB),rawH=Math.max(hL,hR);
+        // Scale up for clarity but cap for mobile perf
+        const SC=Math.min(2.2,2600/Math.max(rawW,rawH));
+        const outW=Math.round(rawW*SC),outH=Math.round(rawH*SC);
 
-        // Scale up output for better resolution
-        const SCALE = Math.min(2.5, 3000 / Math.max(Math.max(wT,wB), Math.max(hL,hR)));
-        const outW=Math.round(Math.max(wT,wB)*SCALE);
-        const outH=Math.round(Math.max(hL,hR)*SCALE);
+        const srcC=document.createElement("canvas");srcC.width=IW;srcC.height=IH;
+        srcC.getContext("2d").drawImage(img,0,0);
+        const srcPx=srcC.getContext("2d").getImageData(0,0,IW,IH).data;
 
-        // Source pixels
-        const srcC=document.createElement("canvas");
-        srcC.width=W; srcC.height=H;
-        const srcCtx=srcC.getContext("2d");
-        srcCtx.drawImage(img,0,0);
-        const srcPx=srcCtx.getImageData(0,0,W,H).data;
-
-        const dstC=outputCanv.current;
-        dstC.width=outW; dstC.height=outH;
+        const dstC=outCanv.current;dstC.width=outW;dstC.height=outH;
         const dstCtx=dstC.getContext("2d");
-        const dstData=dstCtx.createImageData(outW,outH);
-        const d=dstData.data;
+        const dstId=dstCtx.createImageData(outW,outH);const d=dstId.data;
 
-        // Bilinear perspective warp with upscaling
         for(let dy=0;dy<outH;dy++){
           const v=dy/outH;
           for(let dx=0;dx<outW;dx++){
@@ -877,584 +754,424 @@ function ScannerModal({ open, onClose, onUse }) {
             const sx=(1-u)*(1-v)*pts[0].x+u*(1-v)*pts[1].x+u*v*pts[2].x+(1-u)*v*pts[3].x;
             const sy=(1-u)*(1-v)*pts[0].y+u*(1-v)*pts[1].y+u*v*pts[2].y+(1-u)*v*pts[3].y;
             const x0=Math.floor(sx),y0=Math.floor(sy);
-            const x1=Math.min(x0+1,W-1),y1=Math.min(y0+1,H-1);
-            const fx=sx-x0,fy=sy-y0;
-            const di=(dy*outW+dx)*4;
+            const x1=Math.min(x0+1,IW-1),y1=Math.min(y0+1,IH-1);
+            const fx=sx-x0,fy=sy-y0,di=(dy*outW+dx)*4;
             for(let ch=0;ch<3;ch++){
-              const tl=srcPx[(y0*W+x0)*4+ch];
-              const tr=srcPx[(y0*W+x1)*4+ch];
-              const bl=srcPx[(y1*W+x0)*4+ch];
-              const br=srcPx[(y1*W+x1)*4+ch];
+              const tl=srcPx[(y0*IW+x0)*4+ch],tr=srcPx[(y0*IW+x1)*4+ch];
+              const bl=srcPx[(y1*IW+x0)*4+ch],br=srcPx[(y1*IW+x1)*4+ch];
               d[di+ch]=Math.round(tl*(1-fx)*(1-fy)+tr*fx*(1-fy)+bl*(1-fx)*fy+br*fx*fy);
             }
             d[di+3]=255;
           }
         }
-        dstCtx.putImageData(dstData,0,0);
-
-        // Apply professional enhancement pipeline
-        enhanceDocument(dstCtx, outW, outH, selectedFilter);
-
-        setFinalImage(dstC.toDataURL("image/jpeg", 0.94));
-        setFilter(selectedFilter);
-        setProcessing(false);
-        setStage("enhance");
-      } catch(err) {
-        console.error(err);
-        setProcessing(false);
-      }
-    }, 40);
+        dstCtx.putImageData(dstId,0,0);
+        enhance(dstCtx,outW,outH,f);
+        setFinalImage(dstC.toDataURL("image/jpeg",0.92));
+        setFilter(f);setOutSize({w:outW,h:outH});
+        setProcessing(false);setStage("enhance");
+      }catch(err){console.error(err);setProcessing(false);}
+    },30);
   }
 
-  // ── PROFESSIONAL DOCUMENT ENHANCEMENT PIPELINE
-  function enhanceDocument(ctx, W, H, mode) {
-    const id=ctx.getImageData(0,0,W,H);
-    const d=id.data;
+  // ── ENHANCEMENT PIPELINE — calibrated to not blow out text
+  function enhance(ctx,W,H,mode){
+    if(mode==="original")return;
+    const id=ctx.getImageData(0,0,W,H);const d=id.data;
 
-    // Step 1: Estimate background (paper) brightness using corner samples
-    const samples=[];
-    [[0,0],[W-1,0],[0,H-1],[W-1,H-1],[W>>1,0],[0,H>>1],[W-1,H>>1],[W>>1,H-1]].forEach(([x,y])=>{
-      const xi=Math.min(x,W-1), yi=Math.min(y,H-1);
-      const i=(yi*W+xi)*4;
-      samples.push(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]);
-    });
-    const bgBrightness=samples.reduce((a,b)=>a+b,0)/samples.length;
-    const brightnessBoost = bgBrightness < 200 ? (220/Math.max(bgBrightness,40)) : 1.0;
-
-    if(mode==="document"){
-      // Professional document mode: white paper, dark text
-      for(let i=0;i<d.length;i+=4){
-        let r=d[i],g=d[i+1],b=d[i+2];
-        const lum=0.299*r+0.587*g+0.114*b;
-
-        // Normalize brightness so paper becomes white
-        r=Math.min(255,r*brightnessBoost);
-        g=Math.min(255,g*brightnessBoost);
-        b=Math.min(255,b*brightnessBoost);
-
-        // Adaptive contrast: push darks darker, lights lighter
-        const newLum=0.299*r+0.587*g+0.114*b;
-        const contrast=1.6;
-        r=Math.min(255,Math.max(0,(r-128)*contrast+148));
-        g=Math.min(255,Math.max(0,(g-128)*contrast+148));
-        b=Math.min(255,Math.max(0,(b-128)*contrast+148));
-
-        // Desaturate slightly — makes paper crisper
-        const final_lum=0.299*r+0.587*g+0.114*b;
-        const sat=0.25; // reduce saturation 75%
-        d[i]  =Math.round(r*sat+final_lum*(1-sat));
-        d[i+1]=Math.round(g*sat+final_lum*(1-sat));
-        d[i+2]=Math.round(b*sat+final_lum*(1-sat));
-      }
-    } else if(mode==="bw"){
-      for(let i=0;i<d.length;i+=4){
-        let lum=(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2])*brightnessBoost;
-        lum=Math.min(255,lum);
-        // S-curve for pure black and white feel
-        lum=lum<128?Math.max(0,lum*0.7):Math.min(255,55+(lum-128)*1.55);
-        d[i]=d[i+1]=d[i+2]=Math.round(lum);
-      }
-    } else if(mode==="highcontrast"){
-      for(let i=0;i<d.length;i+=4){
-        let lum=(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2])*brightnessBoost;
-        // Hard threshold for maximum readability
-        lum=lum<100?Math.max(0,lum*0.5):Math.min(255,80+(lum-100)*1.8);
-        d[i]=d[i+1]=d[i+2]=Math.round(lum);
-      }
-    } else if(mode==="sharp"){
-      // Sharpened text mode — boost contrast + heavy unsharp
-      for(let i=0;i<d.length;i+=4){
-        let r=Math.min(255,d[i]*brightnessBoost);
-        let g=Math.min(255,d[i+1]*brightnessBoost);
-        let b=Math.min(255,d[i+2]*brightnessBoost);
-        d[i]  =Math.min(255,Math.max(0,(r-128)*1.45+148));
-        d[i+1]=Math.min(255,Math.max(0,(g-128)*1.45+148));
-        d[i+2]=Math.min(255,Math.max(0,(b-128)*1.35+138));
-      }
+    // ── Measure actual paper brightness by sampling a center strip
+    // (not corners — corners are often dark background)
+    let bgSum=0,bgN=0;
+    const cx=Math.round(W/2),cy=Math.round(H/2);
+    const sw=Math.round(W*0.3),sh=Math.round(H*0.3);
+    for(let y=cy-sh;y<cy+sh;y+=3)for(let x=cx-sw;x<cx+sw;x+=3){
+      const i=(y*W+x)*4;
+      const lum=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+      if(lum>100){bgSum+=lum;bgN++;} // only count bright pixels (paper, not text)
     }
-    // else "original" — no color change
+    const paperLum=bgN>20?bgSum/bgN:185;
+    // Gentle boost — only if paper is dark, max 1.3x to prevent blowout
+    const boost=paperLum<220?Math.min(1.30,215/Math.max(paperLum,80)):1.0;
 
-    ctx.putImageData(id,0,0);
-
-    if(mode!=="original"){
-      // Unsharp mask — makes text crisp and readable
-      unsharpMask(ctx,W,H, mode==="highcontrast"||mode==="sharp"?2.2:1.8);
-    }
-  }
-
-  function unsharpMask(ctx, W, H, strength) {
-    const id=ctx.getImageData(0,0,W,H);
-    const d=id.data;
-    const blurred=fastBoxBlur(new Uint8ClampedArray(d),W,H,2);
     for(let i=0;i<d.length;i+=4){
-      for(let c=0;c<3;c++){
-        d[i+c]=Math.min(255,Math.max(0, d[i+c]*(1+strength) - blurred[i+c]*strength));
+      let r=d[i],g=d[i+1],b=d[i+2];
+
+      if(mode==="document"){
+        // Brighten paper gently
+        r=Math.min(255,r*boost);g=Math.min(255,g*boost);b=Math.min(255,b*boost);
+        const lum=0.299*r+0.587*g+0.114*b;
+        // Adaptive S-curve: darks go darker (text), lights go lighter (paper)
+        // Key: text pixels (lum<100) get darker, paper pixels (lum>160) get whiter
+        const curve = lum<80  ? lum*0.60             // very dark → black text
+                    : lum<140 ? 48+(lum-80)*0.85     // mid-dark → grey areas
+                    : lum<200 ? 99+(lum-140)*1.35    // light → bright paper
+                              : Math.min(255,180+(lum-200)*2.5); // very light → white
+        const ratio=lum>0?curve/lum:1;
+        r=Math.min(255,Math.max(0,r*ratio));
+        g=Math.min(255,Math.max(0,g*ratio));
+        b=Math.min(255,Math.max(0,b*ratio));
+        // Reduce saturation so paper is neutral white not yellowish
+        const fl=0.299*r+0.587*g+0.114*b;
+        d[i]  =Math.round(r*0.25+fl*0.75);
+        d[i+1]=Math.round(g*0.25+fl*0.75);
+        d[i+2]=Math.round(b*0.25+fl*0.75);
+      } else if(mode==="bw"){
+        const lum=0.299*r+0.587*g+0.114*b;
+        let v=lum*boost;
+        // S-curve: crisp black & white
+        v=v<70?Math.max(0,v*0.5):v<150?35+(v-70)*1.1:Math.min(255,112+(v-150)*1.8);
+        d[i]=d[i+1]=d[i+2]=Math.round(Math.min(255,v));
+      } else if(mode==="highcontrast"){
+        const lum=0.299*r+0.587*g+0.114*b;
+        let v=lum*boost;
+        v=v<90?Math.max(0,v*0.40):v<160?36+(v-90)*1.4:Math.min(255,134+(v-160)*2.0);
+        d[i]=d[i+1]=d[i+2]=Math.round(Math.min(255,v));
+      } else if(mode==="sharp"){
+        r=Math.min(255,r*boost);g=Math.min(255,g*boost);b=Math.min(255,b*boost);
+        d[i]  =Math.min(255,Math.max(0,(r-128)*1.45+133));
+        d[i+1]=Math.min(255,Math.max(0,(g-128)*1.45+133));
+        d[i+2]=Math.min(255,Math.max(0,(b-128)*1.35+128));
       }
     }
     ctx.putImageData(id,0,0);
+    // Unsharp mask — strength calibrated per mode
+    const str=mode==="highcontrast"?2.0:mode==="sharp"?2.5:1.6;
+    unsharp(ctx,W,H,str);
   }
 
-  function fastBoxBlur(data,W,H,r){
-    const tmp=new Uint8ClampedArray(data.length);
-    const out=new Uint8ClampedArray(data.length);
-    // Horizontal
-    for(let y=0;y<H;y++){
-      for(let x=0;x<W;x++){
-        let rv=0,gv=0,bv=0,n=0;
-        for(let dx=-r;dx<=r;dx++){
-          const xi=Math.max(0,Math.min(W-1,x+dx)),i=(y*W+xi)*4;
-          rv+=data[i];gv+=data[i+1];bv+=data[i+2];n++;
-        }
-        const i=(y*W+x)*4;tmp[i]=rv/n;tmp[i+1]=gv/n;tmp[i+2]=bv/n;tmp[i+3]=255;
-      }
-    }
-    // Vertical
-    for(let x=0;x<W;x++){
-      for(let y=0;y<H;y++){
-        let rv=0,gv=0,bv=0,n=0;
-        for(let dy=-r;dy<=r;dy++){
-          const yi=Math.max(0,Math.min(H-1,y+dy)),i=(yi*W+x)*4;
-          rv+=tmp[i];gv+=tmp[i+1];bv+=tmp[i+2];n++;
-        }
-        const i=(y*W+x)*4;out[i]=rv/n;out[i+1]=gv/n;out[i+2]=bv/n;out[i+3]=255;
-      }
-    }
-    return out;
+  function unsharp(ctx,W,H,s){
+    const id=ctx.getImageData(0,0,W,H);const d=id.data;
+    const bl=boxBlur(new Uint8ClampedArray(d),W,H,2);
+    for(let i=0;i<d.length;i+=4)
+      for(let c=0;c<3;c++)d[i+c]=Math.min(255,Math.max(0,d[i+c]*(1+s)-bl[i+c]*s));
+    ctx.putImageData(id,0,0);
+  }
+  function boxBlur(src,W,H,r){
+    const t=new Uint8ClampedArray(src.length),o=new Uint8ClampedArray(src.length);
+    for(let y=0;y<H;y++)for(let x=0;x<W;x++){let a=0,b=0,c=0,n=0;for(let dx=-r;dx<=r;dx++){const xi=Math.max(0,Math.min(W-1,x+dx)),i=(y*W+xi)*4;a+=src[i];b+=src[i+1];c+=src[i+2];n++;}const i=(y*W+x)*4;t[i]=a/n;t[i+1]=b/n;t[i+2]=c/n;t[i+3]=255;}
+    for(let x=0;x<W;x++)for(let y=0;y<H;y++){let a=0,b=0,c=0,n=0;for(let dy=-r;dy<=r;dy++){const yi=Math.max(0,Math.min(H-1,y+dy)),i=(yi*W+x)*4;a+=t[i];b+=t[i+1];c+=t[i+2];n++;}const i=(y*W+x)*4;o[i]=a/n;o[i+1]=b/n;o[i+2]=c/n;o[i+3]=255;}
+    return o;
   }
 
-  function reapplyFilter(f) {
-    if(processing)return;
-    setProcessing(true);
-    setTimeout(()=>{
-      // Re-warp with new filter
-      processDocument(f);
-    },20);
-  }
+  function refilter(f){if(processing)return;processDoc(f);}
 
   if(!open)return null;
 
   const FILTERS=[
-    {id:"document",    icon:"📄", label:"Document",    desc:"White paper, sharp text"},
-    {id:"bw",          icon:"◑",  label:"B&W Scan",     desc:"Classic monochrome"},
-    {id:"highcontrast",icon:"◆",  label:"High Contrast",desc:"Max readability"},
-    {id:"sharp",       icon:"🔍", label:"Sharpened",    desc:"Enhanced text + numbers"},
-    {id:"original",    icon:"⬜", label:"Original",     desc:"No processing"},
+    {id:"document",    icon:"📄",label:"Document",    desc:"White + sharp"},
+    {id:"bw",          icon:"◑", label:"B&W",         desc:"Clean mono"},
+    {id:"highcontrast",icon:"◆", label:"Hi-Contrast",  desc:"Max legibility"},
+    {id:"sharp",       icon:"🔍",label:"Sharpened",   desc:"Text focus"},
+    {id:"original",    icon:"⬜",label:"Original",    desc:"No filter"},
   ];
 
-  const outW=outputCanv.current?.width||0;
-  const outH=outputCanv.current?.height||0;
-  const mpx=outW&&outH?((outW*outH)/1e6).toFixed(1):null;
+  // ── shared header
+  const Hdr = ({title,sub}) => (
+    <div style={{flexShrink:0,display:"flex",alignItems:"center",justifyContent:"space-between",
+      padding:"13px 16px",background:T.card,borderBottom:`1px solid ${T.border}`}}>
+      <div>
+        <div style={{color:T.gold,fontSize:14,fontWeight:700,letterSpacing:"0.12em"}}>{title}</div>
+        <div style={{color:T.muted,fontSize:10,marginTop:1}}>{sub}</div>
+      </div>
+      <button onClick={onClose} style={{
+        background:"transparent",border:`1px solid ${T.border}`,color:T.muted,
+        borderRadius:10,padding:"7px 14px",cursor:"pointer",fontSize:12,fontWeight:600,
+      }}>✕ CANCEL</button>
+    </div>
+  );
 
   return (
     <div style={{
       position:"fixed",inset:0,background:"#000",
-      display:"flex",flexDirection:"column",zIndex:9999,
+      display:"flex",flexDirection:"column",
+      zIndex:9999,overflow:"hidden",
       fontFamily:"'Rajdhani','Inter',sans-serif",
-      touchAction:"none", userSelect:"none",
+      // iOS safe area
+      paddingBottom:"env(safe-area-inset-bottom)",
     }}>
 
-      {/* ══ STAGE 1: LIVE CAMERA ══ */}
-      {stage==="capture" && (
+      {/* ══ STAGE 1: CAMERA ══ */}
+      {stage==="capture"&&(
         <>
-          {/* Full-screen camera */}
-          <div style={{flex:1,position:"relative",overflow:"hidden",background:"#000"}}>
-            <video ref={videoRef} playsInline autoPlay muted
+          {/* Camera fills everything except bottom bar */}
+          <div style={{flex:"1 1 0",position:"relative",overflow:"hidden",background:"#000",minHeight:0}}>
+            <video ref={vidRef} playsInline autoPlay muted
               style={{
-                width:"100%", height:"100%",
+                // ← THE KEY FIX: absolute fill so video covers the entire div
+                position:"absolute",inset:0,
+                width:"100%",height:"100%",
                 objectFit:"cover",
-                display:camError?"none":"block"
               }}/>
 
-            {/* Real-time edge detection overlay */}
-            {!camError && ready && (
+            {/* Live detection overlay */}
+            {!camErr&&(
               <svg style={{position:"absolute",inset:0,width:"100%",height:"100%",pointerEvents:"none"}}>
-                {/* Corner guides always visible */}
-                {!liveCorners && <>
-                  {/* Guide rectangle */}
-                  <rect x="8%" y="12%" width="84%" height="76%" rx="6"
-                    fill="rgba(0,0,0,0.08)"
-                    stroke="rgba(212,175,55,0.4)" strokeWidth="1.5" strokeDasharray="12 5"/>
-                  {/* Corner L-brackets */}
-                  {[
-                    {x:"8%",y:"12%",r:0},
-                    {x:"92%",y:"12%",r:90},
-                    {x:"92%",y:"88%",r:180},
-                    {x:"8%",y:"88%",r:270}
-                  ].map(({x,y,r},i)=>(
-                    <g key={i} transform={`rotate(${r},${x},${y})`}>
-                      <line x1={x} y1={y} x2={`calc(${x} + 20px)`} y2={y} stroke="#D4AF37" strokeWidth="3" strokeLinecap="round"/>
-                      <line x1={x} y1={y} x2={x} y2={`calc(${y} + 20px)`} stroke="#D4AF37" strokeWidth="3" strokeLinecap="round"/>
-                    </g>
-                  ))}
-                </>}
-
-                {/* Live detected document outline */}
-                {liveCorners && (() => {
-                  const W=100,H=100;
-                  const pts=liveCorners.map(c=>({x:c.x*W+"%",y:c.y*H+"%"}));
-                  const pStr=pts.map(p=>`${p.x},${p.y}`).join(" ");
-                  return <>
-                    {/* Glow effect */}
-                    <polygon points={pStr}
-                      fill="rgba(34,197,94,0.08)"
-                      stroke={docDetected?"#22c55e":"#D4AF37"}
-                      strokeWidth="2.5"
-                      filter="url(#glow)"/>
-                    <defs>
-                      <filter id="glow">
-                        <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
-                        <feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge>
-                      </filter>
-                    </defs>
-                    {/* Corner dots */}
-                    {liveCorners.map((c,i)=>(
-                      <circle key={i} cx={c.x*100+"%"} cy={c.y*100+"%"} r="5"
-                        fill={docDetected?"#22c55e":"#D4AF37"}/>
-                    ))}
-                  </>;
+                {!liveC&&(
+                  // Guide brackets when nothing detected
+                  <>
+                    {[[6,10],[94,10],[94,90],[6,90]].map(([cx,cy],i)=>{
+                      const lx=cx<50?1:-1,ly=cy<50?1:-1,len=5;
+                      return(
+                        <g key={i} stroke="rgba(212,175,55,0.65)" strokeWidth="3.5" strokeLinecap="round">
+                          <line x1={cx+"%"} y1={cy+"%"} x2={(cx+lx*len)+"%"} y2={cy+"%"}/>
+                          <line x1={cx+"%"} y1={cy+"%"} x2={cx+"%"} y2={(cy+ly*len)+"%"}/>
+                        </g>
+                      );
+                    })}
+                  </>
+                )}
+                {liveC&&(()=>{
+                  const pts=liveC.map(c=>`${(c.x*100).toFixed(1)}%,${(c.y*100).toFixed(1)}%`).join(" ");
+                  return(
+                    <>
+                      <defs>
+                        <filter id="glow2">
+                          <feGaussianBlur stdDeviation="3" result="b"/>
+                          <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+                        </filter>
+                      </defs>
+                      <polygon points={pts} fill="rgba(34,197,94,0.06)"
+                        stroke="#22c55e" strokeWidth="2.5" filter="url(#glow2)"/>
+                      {liveC.map((c,i)=>(
+                        <circle key={i} cx={(c.x*100)+"%"} cy={(c.y*100)+"%"} r="5" fill="#22c55e"/>
+                      ))}
+                    </>
+                  );
                 })()}
               </svg>
             )}
 
-            {/* Status pill */}
-            {!camError && (
+            {/* Status badge */}
+            {!camErr&&(
               <div style={{
                 position:"absolute",top:16,left:"50%",transform:"translateX(-50%)",
-                background:docDetected?"rgba(34,197,94,0.15)":"rgba(0,0,0,0.6)",
-                border:`1px solid ${docDetected?"#22c55e":"rgba(212,175,55,0.4)"}`,
-                color:docDetected?"#22c55e":T.gold,
-                padding:"6px 18px",borderRadius:99,fontSize:12,
-                fontWeight:700,letterSpacing:"0.1em",whiteSpace:"nowrap",
-                backdropFilter:"blur(8px)",
-                transition:"all 0.3s ease",
+                background:docFound?"rgba(34,197,94,0.18)":"rgba(0,0,0,0.65)",
+                border:`1px solid ${docFound?"#22c55e":"rgba(212,175,55,0.5)"}`,
+                color:docFound?"#22c55e":T.gold,
+                padding:"6px 18px",borderRadius:99,fontSize:12,fontWeight:700,
+                letterSpacing:"0.1em",whiteSpace:"nowrap",
+                backdropFilter:"blur(10px)",pointerEvents:"none",
+                transition:"all 0.3s",
               }}>
-                {docDetected
-                  ? (autoCapture && stableCount>0
-                      ? `📄 HOLD STILL — AUTO-CAPTURING...`
-                      : "✓ DOCUMENT DETECTED")
-                  : "📷 ALIGN DOCUMENT IN FRAME"}
+                {docFound
+                  ?(autoSnap&&stableCnt>0?"⏱ HOLD STILL...":"✓ TICKET FOUND — TAP CAPTURE")
+                  :"📷 POINT CAMERA AT TICKET"}
               </div>
             )}
 
-            {/* Auto-capture progress ring */}
-            {docDetected && autoCapture && stableCount>0 && (
-              <div style={{
-                position:"absolute",bottom:100,left:"50%",transform:"translateX(-50%)",
-                width:56,height:56
-              }}>
-                <svg viewBox="0 0 56 56" style={{transform:"rotate(-90deg)"}}>
-                  <circle cx="28" cy="28" r="24" fill="none" stroke="rgba(34,197,94,0.2)" strokeWidth="4"/>
-                  <circle cx="28" cy="28" r="24" fill="none" stroke="#22c55e" strokeWidth="4"
-                    strokeDasharray={`${2*Math.PI*24}`}
-                    strokeDashoffset={`${2*Math.PI*24*(1-stableCount/5)}`}
-                    style={{transition:"stroke-dashoffset 0.2s"}}/>
+            {/* Auto-capture ring */}
+            {docFound&&autoSnap&&stableCnt>0&&(
+              <div style={{position:"absolute",bottom:12,left:"50%",transform:"translateX(-50%)",width:54,height:54,pointerEvents:"none"}}>
+                <svg viewBox="0 0 54 54" style={{transform:"rotate(-90deg)"}}>
+                  <circle cx="27" cy="27" r="23" fill="none" stroke="rgba(34,197,94,0.2)" strokeWidth="4"/>
+                  <circle cx="27" cy="27" r="23" fill="none" stroke="#22c55e" strokeWidth="4"
+                    strokeDasharray={`${2*Math.PI*23}`}
+                    strokeDashoffset={`${2*Math.PI*23*(1-stableCnt/5)}`}
+                    style={{transition:"stroke-dashoffset 0.18s"}}/>
                 </svg>
               </div>
             )}
 
-            {camError && (
-              <div style={{
-                position:"absolute",inset:0,display:"flex",flexDirection:"column",
-                alignItems:"center",justifyContent:"center",gap:16,background:"#0a0a0c"
-              }}>
+            {/* Camera error state */}
+            {camErr&&(
+              <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",
+                alignItems:"center",justifyContent:"center",gap:16,padding:24}}>
                 <div style={{fontSize:48}}>📷</div>
-                <div style={{color:T.muted,fontSize:14,textAlign:"center",padding:"0 32px"}}>
-                  Camera unavailable on this browser.<br/>Upload a photo instead.
+                <div style={{color:T.muted,fontSize:13,textAlign:"center",lineHeight:1.6}}>
+                  Camera unavailable.<br/>Upload a photo instead.
                 </div>
-                <button onClick={()=>fileInputRef.current.click()} style={{
+                <button onClick={()=>fileRef.current.click()} style={{
                   padding:"14px 32px",background:T.gold,color:"#000",
-                  border:"none",borderRadius:10,fontWeight:800,cursor:"pointer",
-                  fontSize:15,letterSpacing:"0.1em"
+                  border:"none",borderRadius:12,fontWeight:800,fontSize:15,
+                  letterSpacing:"0.08em",cursor:"pointer",
                 }}>📁 UPLOAD PHOTO</button>
               </div>
             )}
 
-            {processing && (
-              <div style={{
-                position:"absolute",inset:0,background:"rgba(0,0,0,0.75)",
-                display:"flex",flexDirection:"column",alignItems:"center",
-                justifyContent:"center",gap:14
-              }}>
-                <div style={{
-                  width:44,height:44,border:`3px solid rgba(212,175,55,0.15)`,
-                  borderTop:`3px solid ${T.gold}`,borderRadius:"50%",
-                  animation:"spin 0.7s linear infinite"
-                }}/>
-                <div style={{color:T.gold,fontSize:13,letterSpacing:"0.12em",fontWeight:700}}>
+            {/* Processing overlay */}
+            {processing&&(
+              <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.7)",
+                display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14}}>
+                <div style={{width:42,height:42,border:`3px solid rgba(212,175,55,0.15)`,
+                  borderTop:`3px solid ${T.gold}`,borderRadius:"50%",animation:"spin 0.7s linear infinite"}}/>
+                <div style={{color:T.gold,fontSize:12,letterSpacing:"0.12em",fontWeight:700}}>
                   DETECTING EDGES...
                 </div>
               </div>
             )}
           </div>
 
-          {/* Bottom controls */}
-          <div style={{
-            background:T.card,borderTop:`1px solid ${T.border}`,
-            padding:"14px 20px 20px",flexShrink:0
-          }}>
+          {/* Fixed bottom controls */}
+          <div style={{flexShrink:0,background:T.card,borderTop:`1px solid ${T.border}`,padding:"12px 16px 16px"}}>
             {/* Auto-capture toggle */}
-            <div style={{
-              display:"flex",alignItems:"center",justifyContent:"space-between",
-              marginBottom:14,padding:"8px 12px",
-              background:T.surface,borderRadius:10,border:`1px solid ${T.border}`
-            }}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+              padding:"10px 14px",background:T.surface,borderRadius:12,
+              border:`1px solid ${T.border}`,marginBottom:10}}>
               <div>
                 <div style={{color:T.text,fontSize:13,fontWeight:600}}>Auto-Capture</div>
-                <div style={{color:T.muted,fontSize:10,marginTop:1}}>Captures when doc is stable ~1s</div>
+                <div style={{color:T.muted,fontSize:10,marginTop:1}}>Snaps when ticket is steady ~1 sec</div>
               </div>
-              <div onClick={()=>setAutoCapture(v=>!v)} style={{
-                width:46,height:26,borderRadius:13,cursor:"pointer",
-                background:autoCapture?"#22c55e":T.border,
-                position:"relative",transition:"background 0.2s",flexShrink:0
+              <div onClick={()=>setAutoSnap(v=>!v)} style={{
+                width:48,height:27,borderRadius:14,cursor:"pointer",
+                background:autoSnap?"#22c55e":T.border,
+                position:"relative",transition:"background 0.2s",flexShrink:0,
               }}>
                 <div style={{
-                  position:"absolute",top:3,
-                  left:autoCapture?22:3,
+                  position:"absolute",top:3.5,left:autoSnap?24:3.5,
                   width:20,height:20,borderRadius:"50%",background:"#fff",
-                  transition:"left 0.2s",boxShadow:"0 1px 4px rgba(0,0,0,0.4)"
+                  transition:"left 0.2s",boxShadow:"0 1px 4px rgba(0,0,0,0.3)",
                 }}/>
               </div>
             </div>
-
+            {/* Buttons */}
             <div style={{display:"flex",gap:10}}>
-              {!camError && (
-                <button
-                  onClick={captureNow}
-                  disabled={!ready||processing}
-                  style={{
-                    flex:2,padding:"16px 0",
-                    background:ready&&!processing?T.gold:T.surface,
-                    color:ready&&!processing?"#000":T.muted,
-                    border:"none",borderRadius:12,fontWeight:800,
-                    fontSize:16,cursor:ready&&!processing?"pointer":"not-allowed",
-                    letterSpacing:"0.1em",display:"flex",
-                    alignItems:"center",justifyContent:"center",gap:8
-                  }}>
-                  <span style={{fontSize:20}}>📸</span> CAPTURE
+              {!camErr&&(
+                <button onClick={snap} disabled={!camReady||processing} style={{
+                  flex:2,height:52,
+                  background:camReady&&!processing?T.gold:T.surface,
+                  color:camReady&&!processing?"#000":T.muted,
+                  border:"none",borderRadius:12,fontWeight:800,
+                  fontSize:16,letterSpacing:"0.1em",
+                  cursor:camReady&&!processing?"pointer":"not-allowed",
+                  display:"flex",alignItems:"center",justifyContent:"center",gap:8,
+                }}>
+                  <span style={{fontSize:18}}>📸</span> CAPTURE
                 </button>
               )}
-              <button onClick={()=>fileInputRef.current.click()} style={{
-                flex:1,padding:"16px 0",background:T.surface,
+              <button onClick={()=>fileRef.current.click()} style={{
+                flex:1,height:52,background:T.surface,
                 color:T.text,border:`1px solid ${T.border}`,borderRadius:12,
                 fontWeight:600,fontSize:14,cursor:"pointer",
-                display:"flex",alignItems:"center",justifyContent:"center",gap:6
+                display:"flex",alignItems:"center",justifyContent:"center",gap:6,
               }}>
                 <span>📁</span> Upload
               </button>
             </div>
-
             <button onClick={onClose} style={{
-              width:"100%",marginTop:10,padding:"10px",background:"transparent",
+              width:"100%",height:42,marginTop:8,background:"transparent",
               color:T.muted,border:`1px solid ${T.border}`,borderRadius:10,
-              fontWeight:600,fontSize:13,cursor:"pointer"
+              fontWeight:600,fontSize:13,cursor:"pointer",
             }}>✕ CANCEL</button>
           </div>
         </>
       )}
 
-      {/* ══ STAGE 2: ADJUST CORNERS ══ */}
-      {stage==="adjust" && (
+      {/* ══ STAGE 2: ADJUST ══ */}
+      {stage==="adjust"&&(
         <>
-          {/* Header */}
-          <div style={{
-            display:"flex",alignItems:"center",justifyContent:"space-between",
-            padding:"14px 18px",background:T.card,
-            borderBottom:`1px solid ${T.border}`,flexShrink:0
-          }}>
-            <div>
-              <div style={{color:T.gold,fontSize:14,fontWeight:700,letterSpacing:"0.12em"}}>
-                ✂ ADJUST EDGES
-              </div>
-              <div style={{color:T.muted,fontSize:10,marginTop:1}}>
-                Drag gold handles to fit the document
-              </div>
-            </div>
-            <button onClick={onClose} style={{
-              background:"transparent",border:`1px solid ${T.border}`,
-              color:T.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12
-            }}>✕</button>
-          </div>
-
-          {/* Canvas area */}
-          <div style={{
-            flex:1,overflow:"auto",display:"flex",
+          <Hdr title="✂ ADJUST EDGES" sub="Drag the 4 gold handles to the ticket corners"/>
+          {/* Canvas fills all space between header and buttons */}
+          <div style={{flex:"1 1 0",minHeight:0,display:"flex",
             alignItems:"center",justifyContent:"center",
-            padding:"10px",background:"#0a0a0c"
-          }}>
-            <canvas ref={adjustCanv}
-              style={{display:"block",maxWidth:"100%",touchAction:"none",borderRadius:4}}
-              onMouseDown={onPtrDown} onMouseMove={onPtrMove}
-              onMouseUp={onPtrUp} onMouseLeave={onPtrUp}
-              onTouchStart={onPtrDown} onTouchMove={onPtrMove} onTouchEnd={onPtrUp}
+            background:"#080808",padding:"8px",overflow:"hidden"}}>
+            <canvas ref={adjCanv}
+              style={{display:"block",maxWidth:"100%",maxHeight:"100%",
+                touchAction:"none",borderRadius:6,cursor:"crosshair"}}
+              onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
+              onTouchStart={onDown} onTouchMove={onMove} onTouchEnd={onUp}
             />
           </div>
-
-          {/* Corner labels hint */}
-          <div style={{
-            display:"flex",justifyContent:"center",gap:8,
-            padding:"8px 16px",background:T.surface,
-            borderTop:`1px solid ${T.border}`,flexShrink:0
-          }}>
-            <div style={{color:T.muted,fontSize:10,letterSpacing:"0.08em",textAlign:"center"}}>
-              ⊕ DRAG THE 4 GOLD HANDLES TO ALIGN DOCUMENT EDGES
+          <div style={{flexShrink:0,background:T.card,borderTop:`1px solid ${T.border}`,padding:"12px 16px 16px"}}>
+            <div style={{color:T.muted,fontSize:10,textAlign:"center",letterSpacing:"0.08em",marginBottom:10}}>
+              ⊕ DRAG THE 4 GOLD HANDLES TO THE CORNERS OF YOUR TICKET
             </div>
-          </div>
-
-          <div style={{
-            padding:"12px 16px 20px",background:T.card,
-            borderTop:`1px solid ${T.border}`,flexShrink:0
-          }}>
             <div style={{display:"flex",gap:10}}>
-              <button onClick={()=>{
-                stopCamera();
-                setStage("capture");setCorners(null);
-                // restart camera
-                setReady(false);setCamError(false);
-                let active=true;
-                (async()=>{
-                  try{
-                    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:3840},height:{ideal:2160}}});
-                    if(!active)return;
-                    streamRef.current=stream;
-                    if(videoRef.current){videoRef.current.srcObject=stream;await videoRef.current.play();}
-                    setReady(true);
-                  }catch{setCamError(true);}
-                })();
-                return ()=>{active=false;};
-              }} style={{
-                flex:1,padding:"14px 0",background:"transparent",
-                color:T.text,border:`1px solid ${T.border}`,borderRadius:10,
-                fontWeight:600,fontSize:14,cursor:"pointer"
+              <button onClick={()=>{reset();boot();}} style={{
+                flex:1,height:52,background:"transparent",color:T.text,
+                border:`1px solid ${T.border}`,borderRadius:12,
+                fontWeight:600,fontSize:14,cursor:"pointer",
               }}>↩ RETAKE</button>
-              <button onClick={()=>processDocument("document")} disabled={processing} style={{
-                flex:2,padding:"14px 0",
+              <button onClick={()=>processDoc("document")} disabled={processing} style={{
+                flex:2,height:52,
                 background:processing?T.surface:T.gold,
                 color:processing?T.muted:"#000",
-                border:"none",borderRadius:10,fontWeight:800,fontSize:15,
+                border:"none",borderRadius:12,fontWeight:800,fontSize:15,
                 cursor:processing?"not-allowed":"pointer",letterSpacing:"0.08em",
-                display:"flex",alignItems:"center",justifyContent:"center",gap:8
+                display:"flex",alignItems:"center",justifyContent:"center",gap:8,
               }}>
                 {processing
-                  ? <><div style={{width:16,height:16,border:"2px solid rgba(0,0,0,0.3)",borderTop:"2px solid #000",borderRadius:"50%",animation:"spin 0.7s linear infinite"}}/> PROCESSING...</>
-                  : "⚡ SCAN DOCUMENT"
-                }
+                  ?<><div style={{width:16,height:16,border:"2px solid rgba(0,0,0,0.25)",borderTop:"2px solid #000",borderRadius:"50%",animation:"spin 0.7s linear infinite"}}/> PROCESSING...</>
+                  :"⚡ SCAN DOCUMENT"}
               </button>
             </div>
           </div>
         </>
       )}
 
-      {/* ══ STAGE 3: ENHANCE + CONFIRM ══ */}
-      {stage==="enhance" && (
+      {/* ══ STAGE 3: ENHANCE ══ */}
+      {stage==="enhance"&&(
         <>
-          {/* Header */}
-          <div style={{
-            display:"flex",alignItems:"center",justifyContent:"space-between",
-            padding:"14px 18px",background:T.card,
-            borderBottom:`1px solid ${T.border}`,flexShrink:0
-          }}>
-            <div>
-              <div style={{color:T.gold,fontSize:14,fontWeight:700,letterSpacing:"0.12em"}}>
-                🎨 ENHANCE & CONFIRM
-              </div>
-              <div style={{color:T.muted,fontSize:10,marginTop:1}}>Choose filter • Confirm scan</div>
-            </div>
-            <button onClick={onClose} style={{
-              background:"transparent",border:`1px solid ${T.border}`,
-              color:T.muted,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12
-            }}>✕</button>
-          </div>
-
+          <Hdr title="🎨 ENHANCE & CONFIRM" sub="Pick a filter • Confirm scan"/>
           {/* Filter strip */}
-          <div style={{
-            display:"flex",gap:6,padding:"10px 12px",
-            background:"#0a0c12",borderBottom:`1px solid ${T.border}`,
-            flexShrink:0,overflowX:"auto",
-            WebkitOverflowScrolling:"touch"
-          }}>
+          <div style={{flexShrink:0,display:"flex",gap:6,padding:"8px 10px",
+            background:"#090909",borderBottom:`1px solid ${T.border}`,
+            overflowX:"auto",WebkitOverflowScrolling:"touch"}}>
             {FILTERS.map(f=>(
-              <button key={f.id} onClick={()=>reapplyFilter(f.id)} style={{
-                flexShrink:0,padding:"8px 14px",borderRadius:10,
-                background:filter===f.id?"rgba(212,175,55,0.13)":"transparent",
+              <button key={f.id} onClick={()=>refilter(f.id)} style={{
+                flexShrink:0,padding:"7px 12px",borderRadius:10,
+                background:filter===f.id?"rgba(212,175,55,0.12)":"transparent",
                 border:`1.5px solid ${filter===f.id?T.gold:T.border}`,
                 color:filter===f.id?T.gold:T.muted,
-                cursor:"pointer",transition:"all 0.15s",
-                fontFamily:"'Rajdhani',sans-serif",textAlign:"left"
+                cursor:"pointer",fontFamily:"'Rajdhani',sans-serif",
               }}>
-                <div style={{fontSize:13,fontWeight:filter===f.id?700:500}}>{f.icon} {f.label}</div>
+                <div style={{fontSize:12,fontWeight:filter===f.id?700:500,whiteSpace:"nowrap"}}>{f.icon} {f.label}</div>
                 <div style={{fontSize:9,color:T.muted,marginTop:1}}>{f.desc}</div>
               </button>
             ))}
           </div>
-
           {/* Preview */}
-          <div style={{
-            flex:1,overflow:"auto",background:"#080808",
-            display:"flex",alignItems:"center",justifyContent:"center",
-            padding:12
-          }}>
-            {processing ? (
-              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:16}}>
-                <div style={{width:44,height:44,border:`3px solid rgba(212,175,55,0.15)`,
-                  borderTop:`3px solid ${T.gold}`,borderRadius:"50%",
-                  animation:"spin 0.7s linear infinite"}}/>
-                <div style={{color:T.muted,fontSize:12,letterSpacing:"0.1em"}}>ENHANCING IMAGE...</div>
+          <div style={{flex:"1 1 0",minHeight:0,overflow:"auto",
+            background:"#060606",display:"flex",alignItems:"center",
+            justifyContent:"center",padding:10}}>
+            {processing?(
+              <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:14}}>
+                <div style={{width:42,height:42,border:`3px solid rgba(212,175,55,0.15)`,
+                  borderTop:`3px solid ${T.gold}`,borderRadius:"50%",animation:"spin 0.7s linear infinite"}}/>
+                <div style={{color:T.muted,fontSize:12,letterSpacing:"0.1em"}}>ENHANCING...</div>
               </div>
-            ) : finalImage && (
-              <img src={finalImage} alt="Scanned document"
+            ):finalImage&&(
+              <img src={finalImage} alt="Scan"
                 style={{maxWidth:"100%",maxHeight:"100%",borderRadius:4,
-                  boxShadow:"0 0 0 1px rgba(212,175,55,0.2), 0 16px 48px rgba(0,0,0,0.9)"}}/>
+                  boxShadow:"0 0 0 1px rgba(212,175,55,0.15),0 8px 32px rgba(0,0,0,0.8)"}}/>
             )}
           </div>
-
-          {/* Quality info bar */}
-          {!processing && finalImage && (
-            <div style={{
-              padding:"7px 16px",background:T.surface,
-              borderTop:`1px solid ${T.border}`,flexShrink:0,
-              display:"flex",justifyContent:"space-between",alignItems:"center"
-            }}>
+          {/* Metadata */}
+          {!processing&&finalImage&&(
+            <div style={{flexShrink:0,padding:"5px 14px",background:T.surface,
+              borderTop:`1px solid ${T.border}`,display:"flex",
+              justifyContent:"space-between",alignItems:"center"}}>
               <span style={{color:T.muted,fontSize:10}}>
-                📐 {outW}×{outH} &nbsp;·&nbsp; {mpx}MP
+                {outSize.w}×{outSize.h}px · {((outSize.w*outSize.h)/1e6).toFixed(1)}MP
               </span>
-              <span style={{
-                background:"rgba(34,197,94,0.1)",color:"#22c55e",
-                fontSize:10,padding:"3px 10px",borderRadius:99,fontWeight:700
-              }}>✓ READY TO SUBMIT</span>
+              <span style={{background:"rgba(34,197,94,0.1)",color:"#22c55e",
+                fontSize:10,padding:"3px 10px",borderRadius:99,fontWeight:700}}>
+                ✓ READY
+              </span>
             </div>
           )}
-
-          {/* Action buttons */}
-          <div style={{
-            padding:"12px 16px 20px",background:T.card,
-            borderTop:`1px solid ${T.border}`,flexShrink:0
-          }}>
+          {/* Actions */}
+          <div style={{flexShrink:0,background:T.card,borderTop:`1px solid ${T.border}`,padding:"12px 16px 16px"}}>
             <div style={{display:"flex",gap:10}}>
               <button onClick={()=>{setStage("adjust");setFinalImage(null);}} style={{
-                flex:1,padding:"14px 0",background:"transparent",
-                color:T.text,border:`1px solid ${T.border}`,borderRadius:10,
-                fontWeight:600,fontSize:14,cursor:"pointer"
+                flex:1,height:52,background:"transparent",color:T.text,
+                border:`1px solid ${T.border}`,borderRadius:12,fontWeight:600,
+                fontSize:14,cursor:"pointer",
               }}>← RE-ADJUST</button>
-              <button
-                disabled={processing||!finalImage}
-                onClick={()=>onUse(finalImage)}
-                style={{
-                  flex:2,padding:"14px 0",
-                  background:!processing&&finalImage?T.gold:T.surface,
-                  color:!processing&&finalImage?"#000":T.muted,
-                  border:"none",borderRadius:10,fontWeight:800,fontSize:15,
-                  cursor:!processing&&finalImage?"pointer":"not-allowed",
-                  letterSpacing:"0.08em"
-                }}>✓ USE THIS SCAN</button>
+              <button disabled={processing||!finalImage} onClick={()=>onUse(finalImage)} style={{
+                flex:2,height:52,
+                background:!processing&&finalImage?T.gold:T.surface,
+                color:!processing&&finalImage?"#000":T.muted,
+                border:"none",borderRadius:12,fontWeight:800,fontSize:15,
+                cursor:!processing&&finalImage?"pointer":"not-allowed",
+                letterSpacing:"0.08em",
+              }}>✓ USE THIS SCAN</button>
             </div>
           </div>
         </>
       )}
 
-      {/* Hidden elements */}
-      <canvas ref={captureCanv} style={{display:"none"}}/>
-      <canvas ref={outputCanv}  style={{display:"none"}}/>
-      <input ref={fileInputRef} type="file" accept="image/*"
+      <canvas ref={capCanv} style={{display:"none"}}/>
+      <canvas ref={outCanv} style={{display:"none"}}/>
+      <input ref={fileRef} type="file" accept="image/*"
         capture="environment" style={{display:"none"}} onChange={handleFile}/>
     </div>
   );
