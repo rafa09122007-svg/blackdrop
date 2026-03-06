@@ -994,8 +994,10 @@ function ScannerModal({ open, onClose, onUse }) {
     borderBottom: `1px solid ${T.border}`
   };
   const footerStyle = {
-    height: "auto", minHeight: 96, paddingBottom: "env(safe-area-inset-bottom, 24px)",
-    display: "flex", alignItems: "center", padding: "16px", gap: 12,
+    height: "auto", minHeight: 96,
+    padding: "16px 16px env(safe-area-inset-bottom, 34px) 16px",
+    paddingBottom: "max(env(safe-area-inset-bottom), 34px)",
+    display: "flex", alignItems: "center", gap: 12,
     background: T.card, borderTop: `1px solid ${T.border}`, flexShrink: 0
   };
   const middleStyle = { flex: 1, overflow: "hidden", position: "relative", background: "#050505" };
@@ -1365,6 +1367,14 @@ function SubmitTicket({ phone, onComplete, editTicket }) {
   return (
     <PageShell maxW={520}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+        <button onClick={() => {
+          if (confirm("Any unsaved changes will remain in drafts. Return to dashboard?")) {
+            onComplete();
+          }
+        }} style={{
+          background: "transparent", border: `1px solid ${T.border}`,
+          color: T.muted, borderRadius: 8, padding: "6px 10px", cursor: "pointer", fontSize: 13
+        }}>← Back</button>
         <div>
           <div style={{
             color: T.gold, fontFamily: "'Rajdhani',sans-serif",
