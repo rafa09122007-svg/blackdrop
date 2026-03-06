@@ -694,7 +694,6 @@ function ScannerModal({ open, onClose, onUse }) {
   useEffect(() => {
     if (!open) { stopCam(); setPhase("idle"); setPreview(null); setSourceCanvas(null); setRect(null); setReady(false); setBusy(false); return; }
     setPhase("camera");
-    startCam();
     return () => stopCam();
   }, [open]);
 
@@ -818,7 +817,7 @@ function ScannerModal({ open, onClose, onUse }) {
     ctx.lineTo(bl.x, bl.y);
     ctx.closePath();
     ctx.fill("evenodd");
-    ctx.strokeStyle = T.accent;
+    ctx.strokeStyle = T.gold;
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(tl.x, tl.y);
@@ -835,7 +834,7 @@ function ScannerModal({ open, onClose, onUse }) {
       ctx.fill();
       ctx.beginPath();
       ctx.arc(hx, hy, 7, 0, Math.PI * 2);
-      ctx.fillStyle = T.accent;
+      ctx.fillStyle = T.gold;
       ctx.fill();
       ctx.beginPath();
       ctx.arc(hx, hy, 3, 0, Math.PI * 2);
@@ -1070,26 +1069,21 @@ function ScannerModal({ open, onClose, onUse }) {
     headerLeft = <button onClick={onClose} style={btnStyle}>✕ CANCEL</button>;
     headerTitle = "DOCUMENT SCANNER";
     content = (
-      <>
-        {phase === "camera" && <video ref={videoRef} playsInline autoPlay muted style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover" }} />}
-        {phase === "camera" && ready && !busy && (
-          <div style={{ position: "absolute", top: "10%", left: "8%", right: "8%", bottom: "10%", border: `2px solid rgba(212,175,55,0.6)`, borderRadius: 16, pointerEvents: "none" }}>
-            <div style={{ position: "absolute", left: 0, right: 0, height: 2, background: `linear-gradient(90deg, transparent, ${T.gold}, transparent)`, animation: "scanline 2s ease-in-out infinite" }} />
-          </div>
+      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 20, padding: 24 }}>
+        {busy ? <Spinner size={40} color={T.gold} /> : (
+          <>
+            <div style={{ fontSize: 64, opacity: 0.5 }}>📷</div>
+            <div style={{ color: T.muted, fontSize: 13, textAlign: "center" }}>Take a photo of your document or choose from gallery</div>
+          </>
         )}
-        {(phase === "upload" || !ready || busy) && (
-          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            {busy ? <Spinner size={40} color={T.gold} /> : <div style={{ fontSize: 56, opacity: 0.4 }}>📷</div>}
-          </div>
-        )}
-      </>
+      </div>
     );
     footer = (
       <>
-        <GoldBtn onClick={doCapture} disabled={!ready || phase === "upload" || busy} style={{ flex: 1, padding: "16px 0", fontSize: 18 }}>
-          ACTIVATE SHUTTER
+        <GoldBtn onClick={() => { if (fileRef.current) { fileRef.current.setAttribute('capture', 'environment'); fileRef.current.click(); } }} disabled={busy} style={{ flex: 1, padding: "16px 0", fontSize: 16 }}>
+          📷 TAKE PHOTO
         </GoldBtn>
-        <GhostBtn onClick={() => fileRef.current?.click()} style={{ width: 72, flex: "none" }}>
+        <GhostBtn onClick={() => { if (fileRef.current) { fileRef.current.removeAttribute('capture'); fileRef.current.click(); } }} disabled={busy} style={{ width: 72, flex: "none" }}>
           <span style={{ fontSize: 22 }}>🖼</span>
         </GhostBtn>
       </>
@@ -1107,7 +1101,7 @@ function ScannerModal({ open, onClose, onUse }) {
       </div>
       <div style={middleStyle}>{content}</div>
       <div style={footerStyle}>{footer}</div>
-      <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handleFile} />
+      <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleFile} />
       <canvas ref={hiddenCanvas} style={{ display: "none" }} />
     </div>
   );
