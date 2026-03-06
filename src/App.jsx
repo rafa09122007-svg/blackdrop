@@ -404,7 +404,7 @@ function Dashboard({ phone, onLogout, onStartTicket, onOpenQueue }) {
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <GoldBtn onClick={onStartTicket}>📋 SUBMIT NEW TICKET</GoldBtn>
-          <GhostBtn onClick={onOpenQueue}>📥 SUBMISSION QUEUE</GhostBtn>
+          <GhostBtn onClick={onOpenQueue}>📥 BOUNCEBACK QUEUE</GhostBtn>
           <GhostBtn onClick={onLogout} style={{ color: T.muted, borderColor: "#1a1d26" }}>← LOG OUT</GhostBtn>
         </div>
         <div style={{
@@ -437,12 +437,9 @@ function Queue({ phone, onEdit, onBack }) {
     load();
   }, [phone]);
 
-  const counts = useMemo(() => ({
-    total: tickets.length,
-    pending: tickets.filter(t => (t["Status"] || "").includes("PENDING")).length,
-    bounce: tickets.filter(t => t["Status"] === "BOUNCE BACK").length,
-    approved: tickets.filter(t => t["Status"] === "APPROVED").length,
-  }), [tickets]);
+  const bouncedTickets = useMemo(() =>
+    tickets.filter(t => t["Status"] === "BOUNCE BACK"),
+    [tickets]);
 
   return (
     <PageShell maxW={520}>
@@ -453,33 +450,12 @@ function Queue({ phone, onEdit, onBack }) {
         }}>← Back</button>
         <div>
           <div style={{
-            color: T.gold, fontFamily: "'Rajdhani',sans-serif",
+            color: T.danger, fontFamily: "'Rajdhani',sans-serif",
             fontSize: 18, fontWeight: 700, letterSpacing: "0.12em"
-          }}>SUBMISSION QUEUE</div>
-          <div style={{ color: T.muted, fontSize: 11 }}>{counts.total} submissions found</div>
+          }}>BOUNCEBACK QUEUE</div>
+          <div style={{ color: T.muted, fontSize: 11 }}>{bouncedTickets.length} tickets need attention</div>
         </div>
       </div>
-
-      {!loading && counts.total > 0 && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8, marginBottom: 20 }}>
-          {[
-            { label: "Pending", val: counts.pending, color: T.warn },
-            { label: "Approved", val: counts.approved, color: T.success },
-            { label: "Bounce", val: counts.bounce, color: T.danger },
-          ].map(s => (
-            <div key={s.label} style={{
-              background: T.surface, borderRadius: 8, padding: "10px 12px",
-              border: `1px solid ${T.border}`, textAlign: "center"
-            }}>
-              <div style={{
-                color: s.color, fontSize: 22, fontWeight: 700,
-                fontFamily: "'Space Mono',monospace"
-              }}>{s.val}</div>
-              <div style={{ color: T.muted, fontSize: 10, marginTop: 2 }}>{s.label}</div>
-            </div>
-          ))}
-        </div>
-      )}
 
       {loading && (
         <div style={{
@@ -491,13 +467,14 @@ function Queue({ phone, onEdit, onBack }) {
         </div>
       )}
 
-      {!loading && tickets.length === 0 && (
-        <div style={{ color: T.muted, textAlign: "center", padding: 40 }}>
-          No submissions found in system.
+      {!loading && bouncedTickets.length === 0 && (
+        <div style={{ color: T.success, textAlign: "center", padding: 40, fontSize: 14 }}>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>🎉</div>
+          No bounced tickets found. You are all caught up!
         </div>
       )}
 
-      {tickets.map((ticket, i) => {
+      {bouncedTickets.map((ticket, i) => {
         const status = ticket["Status"] || "PENDING";
         const isBounce = status === "BOUNCE BACK";
         return (
@@ -533,20 +510,18 @@ function Queue({ phone, onEdit, onBack }) {
                 "{ticket["Notes"]}"
               </div>
             )}
-            {isBounce && (
-              <button onClick={() => onEdit(ticket)} style={{
-                marginTop: 12, width: "100%", padding: "10px 16px",
-                background: "rgba(212,175,55,0.1)", border: `1px solid ${T.goldDim}`,
-                color: T.gold, borderRadius: 8, fontWeight: 700, fontSize: 12,
-                letterSpacing: "0.1em", cursor: "pointer",
-                fontFamily: "'Rajdhani',sans-serif", transition: "all 0.15s"
-              }}
-                onMouseEnter={e => e.currentTarget.style.background = "rgba(212,175,55,0.2)"}
-                onMouseLeave={e => e.currentTarget.style.background = "rgba(212,175,55,0.1)"}
-              >
-                ✎ EDIT & RESUBMIT
-              </button>
-            )}
+            <button onClick={() => onEdit(ticket)} style={{
+              marginTop: 12, width: "100%", padding: "10px 16px",
+              background: "rgba(212,175,55,0.1)", border: `1px solid ${T.goldDim}`,
+              color: T.gold, borderRadius: 8, fontWeight: 700, fontSize: 12,
+              letterSpacing: "0.1em", cursor: "pointer",
+              fontFamily: "'Rajdhani',sans-serif", transition: "all 0.15s"
+            }}
+              onMouseEnter={e => e.currentTarget.style.background = "rgba(212,175,55,0.2)"}
+              onMouseLeave={e => e.currentTarget.style.background = "rgba(212,175,55,0.1)"}
+            >
+              {isBounce ? "✎ FIX BOUNCED TICKET" : "✎ EDIT TICKET"}
+            </button>
           </div>
         );
       })}
@@ -1008,13 +983,39 @@ function ScannerModal({ open, onClose, onUse }) {
 
   if (!open) return null;
 
-  const modalStyle = { position: "fixed", top: 0, left: 0, width: "100vw", height: "100dvh", minHeight: "100vh", zIndex: 99999, background: "#000", display: "flex", flexDirection: "column", overflow: "hidden" };
-  const headerStyle = { height: 64, minHeight: 64, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 16px", background: T.card, borderBottom: `1px solid ${T.border}` };
-  const footerStyle = { height: 96, minHeight: 96, display: "flex", alignItems: "center", padding: "0 16px", gap: 12, background: T.card, borderTop: `1px solid ${T.border}` };
+  const modalStyle = {
+    position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+    zIndex: 99999, background: "#000", display: "flex", flexDirection: "column",
+    height: "100dvh"
+  };
+  const headerStyle = {
+    height: 64, flexShrink: 0, display: "flex", alignItems: "center",
+    justifyContent: "space-between", padding: "0 16px", background: T.card,
+    borderBottom: `1px solid ${T.border}`
+  };
+  const footerStyle = {
+    height: "auto", minHeight: 96, paddingBottom: "env(safe-area-inset-bottom, 24px)",
+    display: "flex", alignItems: "center", padding: "16px", gap: 12,
+    background: T.card, borderTop: `1px solid ${T.border}`, flexShrink: 0
+  };
   const middleStyle = { flex: 1, overflow: "hidden", position: "relative", background: "#050505" };
   const btnStyle = { height: 40, borderRadius: 12, background: "transparent", border: "none", color: T.danger, fontSize: 13, fontWeight: 700, cursor: "pointer", padding: "0 16px" };
 
   let headerLeft, headerTitle, content, footer;
+
+  function takePhotoClick() {
+    if (fileRef.current) {
+      fileRef.current.setAttribute("capture", "environment");
+      fileRef.current.click();
+    }
+  }
+
+  function pickGalleryClick() {
+    if (fileRef.current) {
+      fileRef.current.removeAttribute("capture");
+      fileRef.current.click();
+    }
+  }
 
   if (phase === "crop" && preview) {
     headerLeft = <button onClick={retake} style={{ ...btnStyle, color: T.muted }}>← RETAKE</button>;
@@ -1036,7 +1037,7 @@ function ScannerModal({ open, onClose, onUse }) {
             </div>
           </div>
         )}
-        <div style={{ position: "absolute", bottom: 16, right: 16, display: "flex", alignItems: "center", gap: 8, background: "rgba(0,0,0,0.8)", padding: "10px 14px", borderRadius: 20, border: `1px solid ${T.border}` }}>
+        <div style={{ position: "absolute", bottom: 16, right: 16, display: "flex", alignItems: "center", gap: 8, background: "rgba(0,0,0,0.8)", padding: "10px 14px", borderRadius: 20, border: `1px solid ${T.border}`, zIndex: 100 }}>
           <span style={{ color: "#fff", fontSize: 12, fontWeight: 700, fontFamily: "'Rajdhani',sans-serif", letterSpacing: "0.05em" }}>AI ENHANCE</span>
           <div style={{ width: 40, height: 22, borderRadius: 12, background: enhance ? T.gold : "#444", position: "relative", cursor: "pointer", transition: "0.2s" }} onClick={() => setEnhance(!enhance)}>
             <div style={{ width: 18, height: 18, borderRadius: 9, background: "#fff", position: "absolute", top: 2, left: enhance ? 20 : 2, transition: "0.2s" }} />
@@ -1065,10 +1066,10 @@ function ScannerModal({ open, onClose, onUse }) {
     );
     footer = (
       <>
-        <GoldBtn onClick={() => { if (fileRef.current) { fileRef.current.setAttribute('capture', 'environment'); fileRef.current.click(); } }} disabled={busy} style={{ flex: 1, padding: "16px 0", fontSize: 16 }}>
+        <GoldBtn onClick={takePhotoClick} disabled={busy} style={{ flex: 1, padding: "16px 0", fontSize: 16, WebkitTapHighlightColor: "transparent" }}>
           📷 TAKE PHOTO
         </GoldBtn>
-        <GhostBtn onClick={() => { if (fileRef.current) { fileRef.current.removeAttribute('capture'); fileRef.current.click(); } }} disabled={busy} style={{ width: 72, flex: "none" }}>
+        <GhostBtn onClick={pickGalleryClick} disabled={busy} style={{ width: 72, flex: "none", WebkitTapHighlightColor: "transparent" }}>
           <span style={{ fontSize: 22 }}>🖼</span>
         </GhostBtn>
       </>
