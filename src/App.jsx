@@ -137,9 +137,10 @@ function Label({ text, required }) {
 function Input({ style, ...props }) {
   return (
     <input style={{
-      width: "100%", padding: "10px 12px", background: T.surface,
+      width: "100%", maxWidth: "100%", padding: "10px 12px", background: T.surface,
       border: `1px solid ${T.border}`, color: T.text, borderRadius: 8,
       fontSize: 14, outline: "none", transition: "border-color 0.15s",
+      boxSizing: "border-box",
       ...style
     }}
       onFocus={e => e.target.style.borderColor = T.goldDim}
@@ -1422,33 +1423,33 @@ function SubmitTicket({ phone, onComplete, editTicket }) {
         </Select>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <div>
+          <div style={{ minWidth: 0 }}>
             <Label text="Field Ticket #" required />
             <Input value={form.fieldTicket} onChange={e => update("fieldTicket", e.target.value)} />
           </div>
-          <div>
+          <div style={{ minWidth: 0 }}>
             <Label text={dispatchLabel} required />
             <Input value={form.dispatch} onChange={e => update("dispatch", e.target.value)} />
           </div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <div>
+          <div style={{ minWidth: 0 }}>
             <Label text="Unit / Truck #" required />
             <Input value={form.unit} onChange={e => update("unit", e.target.value)} />
           </div>
-          <div>
+          <div style={{ minWidth: 0 }}>
             <Label text="Driver Name" required />
             <Input value={form.driver} onChange={e => update("driver", e.target.value)} />
           </div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <div>
+          <div style={{ minWidth: 0 }}>
             <Label text="Work Date" required />
             <Input type="date" value={form.workDate} onChange={e => update("workDate", e.target.value)} />
           </div>
-          <div>
+          <div style={{ minWidth: 0 }}>
             <Label text="Well / Lease" required />
             <Input value={form.wellLease} onChange={e => update("wellLease", e.target.value)} />
           </div>
@@ -1458,11 +1459,11 @@ function SubmitTicket({ phone, onComplete, editTicket }) {
         <NotesField value={form.notes} onChange={v => update("notes", v)} />
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 4 }}>
-          <div>
+          <div style={{ minWidth: 0 }}>
             <Label text="Start Time" />
             <Input type="time" value={form.startTime} onChange={e => update("startTime", e.target.value)} />
           </div>
-          <div>
+          <div style={{ minWidth: 0 }}>
             <Label text="End Time" />
             <Input type="time" value={form.endTime} onChange={e => update("endTime", e.target.value)} />
           </div>
